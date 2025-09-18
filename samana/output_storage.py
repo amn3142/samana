@@ -6,13 +6,15 @@ import h5py
 
 
 def output_to_hdf5(output_path, job_name, job_index_min, job_index_max,
-                   write_path, print_missing_files=False, S_max=np.inf):
+                   write_path, print_missing_files=False, S_max=np.inf,
+                   print_progress=False):
 
     param_names = None
     macromodel_sample_names = None
     init = True
     for i in range(job_index_min, job_index_max + 1):
-
+        if print_progress and i % 100 == 0:
+            print('working on output folder ', str(i)+'... ')
         folder = output_path + job_name+ '/job_' + str(i) + '/'
         try:
             params = np.loadtxt(folder + 'parameters.txt', skiprows=1)
@@ -127,6 +129,15 @@ class Output(object):
                     self._macromodel_samples_dict[name] = macromodel_samples[:, i]
             else:
                 self._macromodel_samples_dict = None
+
+    def cut_high_mags(self, mag_max):
+        """
+        Remove elements where any one of the four image magnifications exceeds mag_max
+        :param max_magnification: maximum magnification allowed
+        :return:
+        """
+        inds_keep = np.where(~np.any(self.image_magnifications>mag_max, axis=1))[0]
+        return self.down_select(inds_keep)
 
     def clean(self):
         """

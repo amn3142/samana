@@ -8,6 +8,7 @@ from lenstronomy.Util.class_creator import create_im_sim
 from lenstronomy.LensModel.QuadOptimizer.optimizer import Optimizer
 from samana.image_magnification_util import setup_gaussian_source
 from samana.param_managers import auto_param_class
+from scipy.stats import multivariate_normal
 from copy import deepcopy
 from multiprocessing.pool import Pool
 import os
@@ -38,7 +39,10 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                   use_JAXstronomy=False,
                   split_image_data_reconstruction=False,
                   magnification_method='CIRCULAR_APERTURE',
-                  tolerance_source_reconstruction=None):
+                  tolerance_source_reconstruction=None,
+                  fr_logL_source_reconstruction=None,
+                  return_astrometric_rejections=False,
+                  background_shifting=True):
     """
     Top-level function for forward modeling strong lenses with substructure. This function makes repeated calls to
     the forward_model_single_iteration routine below, and outputs the results to text files. Lens modeling and dark matter
@@ -106,6 +110,12 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
      ray-tracing calculation around pixels identified in the low-resolution calculation
     :param tolerance_source_reconstruction: the tolerance on the summary statistic that triggers the reconstruction of
     the source and lens light when split_image_data_reconstruction=True
+    :param fr_logL_source_reconstruction: the same functionality as tolerance source_reconstruction, but triggers
+    the reconstruction of the imaging data based on the flux ratio likelihood. If specified, fr_logL_source_reconstruction
+    should be abs(log_likelihood), which triggers the source light modeling if abs(logL) < fr_logL_source_reconstruction
+    :param return_astrometric_rejections: if True, will return the macromodel parameters that produced a lens model that
+    doesn't fit the image positions; if False, these solutions will be rejected and not saved as output
+    :param background_shifting: toggles the shifting of background halos to align with the direction to the source
     :return:
     """
 
@@ -203,6 +213,7 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
         if parallelize:
             args = []
             for cpu_index in range(0, num_threads):
+                scale_window_size_decoupled_multiplane = 1
                 args.append((data_class, model, preset_model_name,
                              kwargs_sample_realization,
                              kwargs_sample_source,
@@ -228,7 +239,11 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                              use_JAXstronomy,
                              split_image_data_reconstruction,
                              magnification_method,
-                             tolerance_source_reconstruction))
+                             tolerance_source_reconstruction,
+                             fr_logL_source_reconstruction,
+                             scale_window_size_decoupled_multiplane,
+                             return_astrometric_rejections,
+                             background_shifting))
 
             pool = Pool(num_threads)
             output = pool.starmap(forward_model_single_iteration, args)
@@ -283,6 +298,7 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                         print('N remaining: ', n_keep - n_kept)
 
         else:
+            scale_window_size_decoupled_multiplane = 1
             magnifications, images, realization_samples, source_samples, macromodel_samples, macromodel_samples_fixed, \
             logL_imaging_data, fitting_sequence, stat, bic, param_names_realization, param_names_source, param_names_macro, \
             param_names_macro_fixed, _, _, _, source_plane_image_solution = forward_model_single_iteration(data_class, model, preset_model_name, kwargs_sample_realization,
@@ -302,7 +318,11 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                                                 use_JAXstronomy,
                                                 split_image_data_reconstruction,
                                                 magnification_method,
-                                                tolerance_source_reconstruction)
+                                                tolerance_source_reconstruction,
+                                                fr_logL_source_reconstruction,
+                                                scale_window_size_decoupled_multiplane,
+                                                return_astrometric_rejections,
+                                                background_shifting)
 
             seed_counter += 1
             acceptance_rate_counter += 1
@@ -442,7 +462,11 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                            use_JAXstronomy=False,
                            split_image_data_reconstruction=False,
                            magnification_method=None,
-                           tolerance_source_reconstruction=None):
+                           tolerance_source_reconstruction=None,
+                           fr_logL_source_reconstruction=None,
+                           scale_window_size_decoupled_multiplane=1.0,
+                           return_astrometric_rejections=False,
+                           background_shifting=True):
     """
 
     :param data_class:
@@ -479,6 +503,9 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
     :param split_image_data_reconstruction:
     :param magnification_method:
     :param tolerance_source_reconstruction:
+    :param fr_logL_source_reconstruction:
+    :param scale_window_size_decoupled_multiplane:
+    :param return_astrometric_rejections:
     :return:
     """
     # set the random seed for reproducibility
@@ -526,15 +553,16 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         print('FIXED MACROMODEL SAMPLES: ')
         print(macromodel_samples_fixed_dict)
 
-    kwargs_lens_macro_init = None
     astropy_cosmo = realization_init.lens_cosmo.cosmo.astropy
-    kwargs_model_align, _, _, _, _ = model_class.setup_kwargs_model(
+    # generate a macromodel that satisfies the lens equation for the perturbed image positions
+    kwargs_model_align, _, kwargs_lens_macro_init, _, _ = model_class.setup_kwargs_model(
         decoupled_multiplane=False,
-        kwargs_lens_macro_init=kwargs_lens_macro_init,
+        kwargs_lens_macro_init=None,
         macromodel_samples_fixed=macromodel_samples_fixed_dict,
         astropy_cosmo=astropy_cosmo,
         x_image=data_class.x_image,
-        y_image=data_class.y_image)
+        y_image=data_class.y_image,
+        verbose=verbose)
     kwargs_params = model_class.kwargs_params(kwargs_lens_macro_init=kwargs_lens_macro_init,
                                               delta_x_image=-delta_x_image,
                                               delta_y_image=-delta_y_image,
@@ -546,12 +574,17 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
     else:
         if verbose:
             print('realization has ' + str(len(realization_init.halos)) + ' halos...')
-        realization, ray_align_x, ray_align_y, _, _ = align_realization(realization_init, kwargs_model_align['lens_model_list'],
+        if background_shifting:
+            # shift halos such that they are symmetric around the center of the lensing volume
+            realization, ray_align_x, ray_align_y, _, _ = align_realization(realization_init,
+                                                        kwargs_model_align['lens_model_list'],
                                                         kwargs_model_align['lens_redshift_list'],
                                                         kwargs_lens_align,
                                                         data_class.x_image,
                                                         data_class.y_image,
                                                         astropy_cosmo)
+        else:
+            realization = realization_init
         if filter_subhalo_kwargs is not None:
             realization = realization.filter_subhalos(**filter_subhalo_kwargs)
             if verbose:
@@ -566,23 +599,27 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         return realization
     lens_model_list_halos, redshift_list_halos, kwargs_halos, _ = realization.lensing_quantities(
         kwargs_mass_sheet={'log_mlow_sheets': log_mlow_mass_sheets, 'kappa_scale_subhalos': kappa_scale_subhalos})
-    grid_resolution_image_data = pixel_size / image_data_grid_resolution_rescale
     astropy_cosmo = realization.lens_cosmo.cosmo.astropy
+    grid_resolution_image_data = pixel_size / image_data_grid_resolution_rescale
+    if use_imaging_data:
+        decoupled_multiplane_grid_type = 'GRID'
+    else:
+        decoupled_multiplane_grid_type = 'POINT'
     kwargs_model, lens_model_init, kwargs_lens_init, index_lens_split, setup_decoupled_multiplane_lens_model_output = (
         model_class.setup_kwargs_model(
-        decoupled_multiplane=use_decoupled_multiplane_approximation,
-        lens_model_list_halos=lens_model_list_halos,
-        kwargs_lens_macro_init=kwargs_lens_macro_init,
-        grid_resolution=grid_resolution_image_data,
-        redshift_list_halos=list(redshift_list_halos),
-        kwargs_halos=kwargs_halos,
-        verbose=verbose,
-        macromodel_samples_fixed=macromodel_samples_fixed_dict,
-        astropy_cosmo=astropy_cosmo,
-        x_image=data_class.x_image,
-        y_image=data_class.y_image,
-        use_JAXstronomy=use_JAXstronomy
-    ))
+            decoupled_multiplane=use_decoupled_multiplane_approximation,
+            lens_model_list_halos=lens_model_list_halos,
+            kwargs_lens_macro_init=kwargs_lens_macro_init,
+            grid_resolution=grid_resolution_image_data,
+            redshift_list_halos=list(redshift_list_halos),
+            kwargs_halos=kwargs_halos,
+            verbose=verbose,
+            macromodel_samples_fixed=macromodel_samples_fixed_dict,
+            astropy_cosmo=astropy_cosmo,
+            use_JAXstronomy=use_JAXstronomy,
+            decoupled_multiplane_grid_type=decoupled_multiplane_grid_type,
+            scale_window_size=scale_window_size_decoupled_multiplane
+        ))
     if 'q' in param_names_macro_fixed and use_imaging_data:
         model_class.set_fixed_q(macromodel_samples_fixed_dict['q'])
     kwargs_constraints = model_class.kwargs_constraints
@@ -594,6 +631,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         kwargs_constraints['point_source_offset'] = False
 
     if use_imaging_data:
+        image_data_grids_computed = True
         if verbose:
             print('running fitting sequence...')
             t0 = time()
@@ -623,6 +661,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         kwargs_multiplane_model = kwargs_model['kwargs_multiplane_model']
 
     else:
+        image_data_grids_computed = False
         param_class_4pointsolver = model_class.param_class_4pointsolver(lens_model_init.lens_model_list,
                                                                         kwargs_lens_init,
                                                                         macromodel_samples_fixed_dict)
@@ -633,6 +672,8 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                            macromodel_samples_fixed_dict)
             else:
                 param_class = param_class_4pointsolver
+            # we use the macromodel parameters that satisfy the lens equation to set up the decopuled multiplane approx.
+            # inside the class
             kwargs_lens_init = kwargs_lens_align + kwargs_lens_init[len(kwargs_lens_align):]
             opt = Optimizer.decoupled_multiplane(data_class.x_image,
                                                  data_class.y_image,
@@ -708,6 +749,10 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                cosmo=astropy_cosmo,
                                z_source=kwargs_model['z_source'])
 
+    if macromodel_readout_function is None:
+        macromodel_readout_function = model_class.macromodel_readout_function
+    samples_macromodel, param_names_macro = macromodel_readout_function(kwargs_solution,
+                                       macromodel_samples_fixed_dict)
     source_x, source_y = lens_model.ray_shooting(data_class.x_image,
                                                  data_class.y_image,
                                                  kwargs_solution)
@@ -719,12 +764,32 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         print('recovered source position: ', source_x, source_y)
     # verify that the lens equation is satisfied to high precision
     source_plane_image_solution = check_lens_equation_solution(source_x, source_y, tolerance=0.0001)
+    output_vector_none = [None] * 18
+    return_sampling_distribution = False
+    if return_astrometric_rejections or return_sampling_distribution:
+        if source_plane_image_solution > 1 or return_sampling_distribution:
+            magnifications = np.array([1.0] * 4)
+            images = None
+            fitting_sequence = None
+            logL_imaging_data = 1
+            stat = -1
+            bic = 1
+            kwargs_model_plot = {}
+            output_vector = (magnifications, images, realization_samples, source_samples, samples_macromodel,
+                             samples_macromodel_fixed, \
+                             logL_imaging_data, fitting_sequence, \
+                             stat, bic, realization_param_names, \
+                             source_param_names, param_names_macro, \
+                             param_names_macro_fixed, kwargs_model_plot, lens_model, kwargs_solution,
+                             source_plane_image_solution)
+            return output_vector
+        else:
+            return output_vector_none
     if source_plane_image_solution > 1:
         # reject this lens model on the basis of not satisfying lens equation
         if verbose:
             print('rejecting lens model on the basis of not satisfying the lens equation')
-        output_vector = [None] * 18
-        return output_vector
+        return output_vector_none
     else:
         if verbose:
             print('computing image magnifications...')
@@ -733,9 +798,9 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                    astropy_cosmo, data_class.z_source)
         grid_size = rescale_grid_size * auto_raytracing_grid_size(source_dict['source_size_pc'])
         grid_resolution = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc'])
-        if use_JAXstronomy:
-            # JAXstronomy will be slower here due to smaller array sizes
-            setup_decoupled_multiplane_lens_model_output = None
+
+        # we pass in setup_decoupled_multiplane_lens_model_output, the decoupled multiplane parameters
+        # computed for the proposed macromodel in setup_kwargs_model
         magnifications, images = model_class.image_magnification_gaussian(source_model_quasar,
                                                                               kwargs_source,
                                                                               lens_model_init,
@@ -811,12 +876,6 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         print('\n')
         print(macromodel_samples_fixed_dict)
 
-    if macromodel_readout_function is None:
-        macromodel_readout_function = model_class.macromodel_readout_function
-
-    samples_macromodel, param_names_macro = macromodel_readout_function(kwargs_solution,
-                                       macromodel_samples_fixed_dict)
-
     if use_imaging_data:
         bic = fitting_sequence.bic
         image_model = create_im_sim(data_class.kwargs_data_joint['multi_band_list'],
@@ -843,8 +902,58 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
             print('imaging data likelihood (without custom mask): ', logL_imaging_data_no_custom_mask)
             print('imaging data likelihood (with custom mask): ', logL_imaging_data)
     else:
-        if split_image_data_reconstruction and stat < tolerance_source_reconstruction:
+        if tolerance_source_reconstruction is not None:
+            assert fr_logL_source_reconstruction is None, ('If tolerance_source_reconstruction is specified, '
+                                                        'then fr_logL_source_reconstruction must not also be'
+                                                           'specified')
+            if verbose and split_image_data_reconstruction: print('triggering image data modeling with a flux ratio summary statistic tolerance of '
+                              +str(tolerance_source_reconstruction))
+            if stat < tolerance_source_reconstruction:
+                reconstruct_image_data = True
+            else:
+                reconstruct_image_data = False
+        elif fr_logL_source_reconstruction is not None:
+            assert fr_logL_source_reconstruction > 0, ('The flux ratio logL triggering the source reconstruction should be'
+                                                       '>0')
+            if verbose: print('triggering image data modeling with a flux ratio log-likelihood tolerance of '
+                              +str(fr_logL_source_reconstruction))
+            _flux_ratio_logL = multivariate_normal.logpdf(np.array(flux_ratios),
+                                   mean=np.array(flux_ratios_data),
+                                   cov=data_class.flux_ratio_covariance_matrix)
+            _flux_ratio_logL_norm = multivariate_normal.logpdf(np.array(flux_ratios_data),
+                                   mean=np.array(flux_ratios_data),
+                                   cov=data_class.flux_ratio_covariance_matrix)
+            _flux_ratio_logL = multivariate_normal.logpdf(flux_ratios,
+                                                          mean=flux_ratios_data,
+                                                          cov=data_class.flux_ratio_covariance_matrix)
 
+            flux_ratio_logL = _flux_ratio_logL - _flux_ratio_logL_norm
+            if verbose: print('flux ratio logL: ', flux_ratio_logL)
+            if flux_ratio_logL > -1*fr_logL_source_reconstruction:
+                reconstruct_image_data = True
+            else:
+                reconstruct_image_data = False
+        else:
+            reconstruct_image_data = False
+        if split_image_data_reconstruction and reconstruct_image_data:
+            image_data_grids_computed = True
+            kwargs_model, lens_model_init, kwargs_lens_init, index_lens_split, setup_decoupled_multiplane_lens_model_output = (
+                model_class.setup_kwargs_model(
+                    decoupled_multiplane=use_decoupled_multiplane_approximation,
+                    lens_model_list_halos=lens_model_list_halos,
+                    kwargs_lens_macro_init=kwargs_lens_macro_init,
+                    grid_resolution=grid_resolution_image_data,
+                    redshift_list_halos=list(redshift_list_halos),
+                    kwargs_halos=kwargs_halos,
+                    verbose=verbose,
+                    macromodel_samples_fixed=macromodel_samples_fixed_dict,
+                    astropy_cosmo=astropy_cosmo,
+                    x_image=data_class.x_image,
+                    y_image=data_class.y_image,
+                    use_JAXstronomy=use_JAXstronomy,
+                    decoupled_multiplane_grid_type='GRID',
+                    scale_window_size=scale_window_size_decoupled_multiplane
+                ))
             kwargs_params = model_class.kwargs_params(kwargs_lens_macro_init=kwargs_solution,
                                                       delta_x_image=-delta_x_image,
                                                       delta_y_image=-delta_y_image,
@@ -899,11 +1008,28 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         kwargs_model_plot = {'multi_band_list': data_class.kwargs_data_joint['multi_band_list'],
                              'kwargs_model': kwargs_model,
                              'kwargs_params': kwargs_result}
-    elif split_image_data_reconstruction and stat < tolerance_source_reconstruction:
+    elif split_image_data_reconstruction and reconstruct_image_data:
         kwargs_model_plot = {'multi_band_list': data_class.kwargs_data_joint['multi_band_list'],
                              'kwargs_model': kwargs_model,
                              'kwargs_params': kwargs_result}
     else:
+        if image_data_grids_computed is False and test_mode:
+            kwargs_model, lens_model_init, kwargs_lens_init, index_lens_split, setup_decoupled_multiplane_lens_model_output = (
+                model_class.setup_kwargs_model(
+                    decoupled_multiplane=use_decoupled_multiplane_approximation,
+                    lens_model_list_halos=lens_model_list_halos,
+                    kwargs_lens_macro_init=kwargs_lens_macro_init,
+                    grid_resolution=grid_resolution_image_data,
+                    redshift_list_halos=list(redshift_list_halos),
+                    kwargs_halos=kwargs_halos,
+                    verbose=verbose,
+                    macromodel_samples_fixed=macromodel_samples_fixed_dict,
+                    astropy_cosmo=astropy_cosmo,
+                    x_image=data_class.x_image,
+                    y_image=data_class.y_image,
+                    use_JAXstronomy=use_JAXstronomy,
+                    decoupled_multiplane_grid_type='GRID'
+                ))
         fitting_sequence = FittingSequence(data_class.kwargs_data_joint,
                                            kwargs_model,
                                            kwargs_constraints,
@@ -917,6 +1043,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                              'kwargs_params': kwargs_result}
 
     if test_mode:
+
         from lenstronomy.Plots.model_plot import ModelPlot
         from lenstronomy.Plots import chain_plot
         import matplotlib.pyplot as plt
@@ -979,9 +1106,12 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         fig = plt.figure()
         fig.set_size_inches(12, 12)
         ax = plt.axes(projection='3d')
-        realization.plot(ax,
-                         ray_interp_x_list=ray_align_x,
-                         ray_interp_y_list=ray_align_y)
+        if background_shifting:
+            realization.plot(ax,
+                             ray_interp_x_list=ray_align_x,
+                             ray_interp_y_list=ray_align_y)
+        else:
+            realization.plot(ax)
         plt.show()
         a=input('continue?')
 

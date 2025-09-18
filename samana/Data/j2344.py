@@ -15,7 +15,7 @@ class _J2344(ImagingDataBase):
         if image_data_type == 'HST814W':
             raise Exception('no hst imaging data for this system')
 
-        elif image_data_type == 'MIRI540W':
+        elif image_data_type == 'MIRI560W':
             from samana.Data.ImageData.j2344_MIRI540W import psf_model, image_data, noise_map
             self._psf_estimate_init = psf_model
             self._psf_error_map_init = None
@@ -31,7 +31,7 @@ class _J2344(ImagingDataBase):
             self._exposure_time = None
             self._noise_map = noise_map
         else:
-            raise Exception('image data type must be either HST814W or MIRI540W')
+            raise Exception('image data type must be either HST814W or MIRI560W')
 
         self._supersample_factor = supersample_factor
 
@@ -121,7 +121,11 @@ class J2344_MIRI(_J2344):
 
         x_image = np.array([-0.41950206, 0.17051697, 0.46399316, -0.17500807])
         y_image = np.array([0.13005771, 0.47974816, -0.19611058, -0.53369529])
-        horizontal_shift = 0.01
+        delta_x = np.array([0.0, -0.005, -0.007, -0.003])
+        delta_y = np.array([0.0, -0.001, 0.003, 0.003])
+        x_image += delta_x
+        y_image += delta_y
+        horizontal_shift = 0.005
         vertical_shift = 0.0
         x_image += horizontal_shift
         y_image += vertical_shift
@@ -129,7 +133,7 @@ class J2344_MIRI(_J2344):
         flux_uncertainties = None
         uncertainty_in_fluxes = False
         magnifications = np.array([1.0] * 4)
-        image_data_type = 'MIRI540W'
+        image_data_type = 'MIRI560W'
         super(J2344_MIRI, self).__init__(x_image,
                                          y_image,
                                          magnifications,

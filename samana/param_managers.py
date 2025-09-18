@@ -76,7 +76,8 @@ class PowerLawParamManager(object):
             thetaE_shift = 0.25
             center_shift = 0.2
             e_shift = 0.2
-            g_shift = 0.05
+            # g_shift = 0.05
+            g_shift = 0.01
 
         shifts = np.array([thetaE_shift, center_shift, center_shift, e_shift, e_shift, g_shift, g_shift])
         low = np.array(args) - shifts * scale
@@ -191,7 +192,7 @@ class EPLMultipole134LensMassPrior(EPLMultipole134):
         self._sigmaxy = sigma_xy
         self._q = q
         self._gamma_ext = gamma_ext
-        super(EPLMultipole134LensMassPrior, self).__init__(kwargs_lens_init, a1a_init, a4a_init, a3a_init,
+        super(EPLMultipole134LensMassPrior, self).__init__(kwargs_lens_init, a1a_init, a3a_init, a4a_init,
                  delta_phi_m1, delta_phi_m3, delta_phi_m4, q, gamma_ext)
 
     def param_chi_square_penalty(self, args, q_min=0.1):
