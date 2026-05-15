@@ -49,7 +49,12 @@ def compute_fluxratio_summarystat(f, measured_flux_ratios, measurement_uncertain
         else:
             perturbed_fluxes = np.random.normal(f,
                                                 measurement_uncertainties)
-            perturbed_flux_ratio = perturbed_fluxes[:, 1:] / perturbed_fluxes[:, 0, np.newaxis]
+            if perturbed_fluxes.shape[1] == 8:
+                fr_1 = perturbed_fluxes[:, 1:4] / perturbed_fluxes[:, 0, np.newaxis]
+                fr_2 = perturbed_fluxes[:, 5:] / perturbed_fluxes[:, 4, np.newaxis]
+                perturbed_flux_ratio = np.hstack([fr_1, fr_2])
+            else:
+                perturbed_flux_ratio = perturbed_fluxes[:, 1:] / perturbed_fluxes[:, 0, np.newaxis]
             perturbed_flux_ratio = perturbed_flux_ratio[:, keep_index_list]
             sigmas = [1.0] * perturbed_flux_ratio.shape[1]
 

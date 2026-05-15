@@ -7,6 +7,7 @@ from lenstronomy.Util.magnification_finite_util import auto_raytracing_grid_reso
 from lenstronomy.Cosmo.background import Background
 from samana.output_storage import Output
 from samana.forward_model_util import sample_prior
+from samana.inference_util import compute_fluxratio_summarystat
 
 
 class TestTwoSources(object):
@@ -73,6 +74,31 @@ class TestTwoSources(object):
         except Exception as e:
             assert 'two-source' in str(e)
 
+    def test_fluxratio_summarystat_two_sources(self):
+        # source 1: [10, 8, 6, 4], source 2: [5, 4, 3, 2]
+        # expected flux ratios: source 1 [0.8, 0.6, 0.4], source 2 [0.8, 0.6, 0.4]
+        # uncertainties are on the fluxes (8 values), not the ratios
+        fluxes = np.array([[10., 8., 6., 4., 5., 4., 3., 2.]])
+        measured_flux_ratios = np.array([0.8, 0.6, 0.4, 0.8, 0.6, 0.4])
+        measurement_uncertainties = np.array([0.5, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25])
+        keep_index_list = [0, 1, 2, 3, 4, 5]
+        stat = compute_fluxratio_summarystat(fluxes, measured_flux_ratios,
+                                             measurement_uncertainties,
+                                             uncertainty_on_ratios=False,
+                                             keep_index_list=keep_index_list)
+        # perfect match should give a near-zero statistic
+        npt.assert_array_less(stat, 0.5)
+
+        # confirm that single-source path is unchanged
+        fluxes_single = np.array([[10., 8., 6., 4.]])
+        measured_fr_single = np.array([0.8, 0.6, 0.4])
+        uncertainties_single = np.array([0.5, 0.5, 0.5, 0.5])
+        stat_single = compute_fluxratio_summarystat(fluxes_single, measured_fr_single,
+                                                    uncertainties_single,
+                                                    uncertainty_on_ratios=False,
+                                                    keep_index_list=[0, 1, 2])
+        npt.assert_array_less(stat_single, 0.5)
+
     def test_sample_prior_two_sources(self):
         kwargs_sample_source = {
             'source_size_pc':   ['UNIFORM', 1.0, 10.0],
@@ -94,5 +120,6 @@ if __name__ == "__main__":
     t.setup_method()
     t.test_same_source_size_same_magnifications()
     t.test_output_two_sources_property()
+    t.test_fluxratio_summarystat_two_sources()
     t.test_sample_prior_two_sources()
     print('PASSED')
