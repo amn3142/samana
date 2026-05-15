@@ -360,7 +360,7 @@ class Output(object):
         if modeled_flux_ratios is None:
             modeled_flux_ratios = modeled_magnifications[:,1:] / modeled_magnifications[:,0,np.newaxis]
         like = 0
-        for i in range(0, 3):
+        for i in range(0, len(measured_flux_ratios)):
             like += (measured_flux_ratios[i] - modeled_flux_ratios[:, i]) ** 2 / measurement_uncertainties[i] ** 2
         flux_ratio_likelihood = np.exp(-0.5 * like)
         norm = np.max(flux_ratio_likelihood)
@@ -376,7 +376,7 @@ class Output(object):
         if modeled_flux_ratios is None:
             modeled_flux_ratios = modeled_magnifications[:,1:] / modeled_magnifications[:,0,np.newaxis]
         stat = 0
-        for i in range(0, 3):
+        for i in range(0, len(measured_flux_ratios)):
             stat += (measured_flux_ratios[i] - modeled_flux_ratios[:,i])**2
         self._flux_ratio_stat = np.sqrt(stat)/measured_flux_ratios.max()
         if verbose:
@@ -387,11 +387,29 @@ class Output(object):
             print('S = 0.1: ', np.sum(self._flux_ratio_stat < 0.1))
 
     @property
-    def flux_ratios(self):
+    def two_sources(self):
+        return self.image_magnifications.shape[1] == 8
 
+    @property
+    def flux_ratios(self):
         if not hasattr(self, '_flux_ratios'):
-            self._flux_ratios = self.image_magnifications[:, 1:] / self.image_magnifications[:, 0, np.newaxis]
+            if self.two_sources:
+                self._flux_ratios = np.hstack([self.flux_ratios_1, self.flux_ratios_2])
+            else:
+                self._flux_ratios = self.image_magnifications[:, 1:] / self.image_magnifications[:, 0, np.newaxis]
         return self._flux_ratios
+
+    @property
+    def flux_ratios_1(self):
+        mags = self.image_magnifications[:, :4]
+        return mags[:, 1:] / mags[:, 0, np.newaxis]
+
+    @property
+    def flux_ratios_2(self):
+        if not self.two_sources:
+            raise Exception('flux_ratios_2 is only available for two-source runs (8 magnifications)')
+        mags = self.image_magnifications[:, 4:]
+        return mags[:, 1:] / mags[:, 0, np.newaxis]
 
     def parameter_array(self, param_names):
 
