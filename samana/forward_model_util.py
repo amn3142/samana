@@ -333,7 +333,12 @@ def flux_ratio_summary_statistic(normalized_magnifcations_measured, model_magnif
     :param keep_flux_ratio_index:
     :return:
     """
-    _flux_ratios_data = np.array(normalized_magnifcations_measured[1:]) / normalized_magnifcations_measured[0]
+    two_sources = len(normalized_magnifcations_measured) == 8
+    if two_sources:
+        m = np.array(normalized_magnifcations_measured)
+        _flux_ratios_data = np.concatenate([m[1:4] / m[0], m[5:8] / m[4]])
+    else:
+        _flux_ratios_data = np.array(normalized_magnifcations_measured[1:]) / normalized_magnifcations_measured[0]
     # account for measurement uncertainties in the measured fluxes or flux ratios
     if uncertainty_in_fluxes:
         if measurement_uncertainties is None:
@@ -343,13 +348,21 @@ def flux_ratio_summary_statistic(normalized_magnifcations_measured, model_magnif
             mags_with_uncertainties = [model_magnifications[j] +
                                        np.random.normal(0.0, measurement_uncertainties[j]*model_magnifications[j])
                                        for j in range(0, len(model_magnifications))]
-        _flux_ratios = np.array(mags_with_uncertainties)[1:] / mags_with_uncertainties[0]
+        mw = np.array(mags_with_uncertainties)
+        if two_sources:
+            _flux_ratios = np.concatenate([mw[1:4] / mw[0], mw[5:8] / mw[4]])
+        else:
+            _flux_ratios = mw[1:] / mw[0]
     else:
-        _fr = model_magnifications[1:] / model_magnifications[0]
+        if two_sources:
+            mm = np.array(model_magnifications)
+            _fr = np.concatenate([mm[1:4] / mm[0], mm[5:8] / mm[4]])
+        else:
+            _fr = model_magnifications[1:] / model_magnifications[0]
         if measurement_uncertainties is None:
             fluxratios_with_uncertainties = deepcopy(_fr)
         else:
-            assert len(measurement_uncertainties) == len(model_magnifications) - 1
+            assert len(measurement_uncertainties) == len(_fr)
             fluxratios_with_uncertainties = [_fr[j] + np.random.normal(0.0, _fr[j]*measurement_uncertainties[j])
                                              for j in range(0, len(_fr))]
         _flux_ratios = np.array(fluxratios_with_uncertainties)
