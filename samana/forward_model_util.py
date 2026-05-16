@@ -333,7 +333,7 @@ def flux_ratio_summary_statistic(normalized_magnifcations_measured, model_magnif
     :param keep_flux_ratio_index:
     :return:
     """
-    two_sources = len(normalized_magnifcations_measured) == 8
+    two_sources = len(model_magnifications) == 8
     if two_sources:
         m = np.array(normalized_magnifcations_measured)
         _flux_ratios_data = np.concatenate([m[1:4] / m[0], m[5:8] / m[4]])
