@@ -77,6 +77,16 @@ Three separate prior dicts are passed to `forward_model`: `kwargs_sample_realiza
 `samana/analysis_util.py`: higher-level analysis helpers.  
 `samana/plotting_util.py`: plotting utilities.
 
+### Run scripts (`/home/anierenberg/repositories/test_dual_sources/`)
+
+Production run scripts live outside this repo. Each per-lens script (e.g. `j0405.py`) imports from three shared config files in that directory:
+
+- **`flux_ratio_measurements.py`** — `measurements` dict keyed by lens ID. Each entry contains `measured_fluxes`, `flux_ratio_covariance_matrix` (N×N for N flux ratios), `keep_flux_ratio_index`, and `uncertainty_on_ratios`. For two-source runs, the covariance matrix should be 6×6 (block diagonal: source 1's 3×3 in the top-left, source 2's 3×3 in the bottom-right).
+- **`background_source_priors.py`** — `source_priors` dict keyed by lens ID. Each entry contains `source_size_pc` (prior spec), optionally `source_size_pc_2` for two-source runs, `shapelets_order`, and `mask_images_reconstruction`.
+- **`realization_priors_wdm.py`** / **`realisation_priors_sidm_fixed.py`** — DM realization prior dicts.
+
+The run script sets `data_class.flux_ratio_covariance_matrix` and `data_class.magnifications` directly before calling `forward_model`.
+
 ### Adding a new lens system
 
 1. Create `samana/Data/<sysname>.py` inheriting from `ImagingDataBase` (or `QuadNoImageDataBase`). Implement `coordinate_properties`, `kwargs_psf`, `kwargs_numerics`, and `likelihood_masks`.
