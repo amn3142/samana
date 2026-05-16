@@ -926,6 +926,33 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                               magnification_method=magnification_method,
                                                                               rotation_angle_list=rotation_angle_list,
                                                                               hessian_eigenvalue_list=hessian_eigenvalue_list)
+        two_sources = False
+        if 'source_size_pc_2' in source_dict.keys():
+            two_sources = True
+            if verbose:
+                print('computing source 2 magnifications...')
+            magnifications_1 = magnifications.copy()
+            source_model_quasar_2, kwargs_source_2 = setup_gaussian_source(source_dict['source_size_pc_2'],
+                                                                           np.mean(source_x), np.mean(source_y),
+                                                                           astropy_cosmo, data_class.z_source)
+            grid_size_base_2 = auto_raytracing_grid_size(source_dict['source_size_pc_2'])
+            grid_resolution_2 = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc_2'])
+            if isinstance(rescale_grid_size, list) or isinstance(rescale_grid_size, np.ndarray):
+                grid_size_list_2 = [s * grid_size_base_2 for s in rescale_grid_size]
+            else:
+                grid_size_list_2 = [rescale_grid_size * grid_size_base_2] * len(data_class.x_image)
+            magnifications_2, images = model_class.image_magnification_gaussian(source_model_quasar_2,
+                                                                                  kwargs_source_2,
+                                                                                  lens_model_init,
+                                                                                  kwargs_lens_init,
+                                                                                  kwargs_solution,
+                                                                                  grid_size_list_2,
+                                                                                  grid_resolution_2,
+                                                                                  setup_decoupled_multiplane_lens_model_output,
+                                                                                  magnification_method=magnification_method,
+                                                                                  rotation_angle_list=rotation_angle_list,
+                                                                                  hessian_eigenvalue_list=hessian_eigenvalue_list)
+            magnifications = np.append(magnifications_1, magnifications_2)
         flux_uncertainty = None
         stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
                                                                                magnifications,
@@ -937,8 +964,18 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
     if verbose:
         print('computed magnifications in '+str(np.round(tend - t0, 1))+' seconds')
         print('magnifications: ', magnifications)
-        print('flux ratios data: ', np.array(data_class.magnifications)[1:] / data_class.magnifications[0])
-        print('flux ratios model: ', magnifications[1:] / magnifications[0])
+        if two_sources:
+            mag_1_data = np.array(data_class.magnifications)[:4]
+            mag_2_data = np.array(data_class.magnifications)[4:]
+            mag_1_model = np.array(magnifications)[:4]
+            mag_2_model = np.array(magnifications)[4:]
+            print('flux ratios data 1: ', mag_1_data[1:] / mag_1_data[0])
+            print('flux ratios model 1: ', mag_1_model[1:] / mag_1_model[0])
+            print('flux ratios data 2: ', mag_2_data[1:] / mag_2_data[0])
+            print('flux ratios model 2: ', mag_2_model[1:] / mag_2_model[0])
+        else:
+            print('flux ratios data: ', np.array(data_class.magnifications)[1:] / data_class.magnifications[0])
+            print('flux ratios model: ', magnifications[1:] / magnifications[0])
         print('statistic: ', stat)
         print(kwargs_solution)
         print('\n')
