@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `samana` is a Python package for dark matter inference using quadruply-imaged quasars (quad lenses). It stores reduced imaging data and lens models for ~28 quad lens systems, and provides tools to forward-model these systems with dark matter substructure using approximate Bayesian computation (ABC).
 
-Key external dependencies: `lenstronomy` (lens modeling), `pyHalo` (dark matter realization generation), `trikde` (KDE-based inference), `cobyqa` (optimization).
+Key external dependencies: `lenstronomy` (lens modeling), `pyHalo` (dark matter realization generation), `trikde` (KDE-based inference), `cobyqa` (optimization). All live as sibling directories under `samana_dual_sources/`.
 
 ## Installation
 
@@ -86,6 +86,16 @@ Production run scripts live outside this repo. Each per-lens script (e.g. `j0405
 - **`realization_priors_wdm.py`** / **`realisation_priors_sidm_fixed.py`** — DM realization prior dicts.
 
 The run script sets `data_class.flux_ratio_covariance_matrix` and `data_class.magnifications` directly before calling `forward_model`.
+
+### pyHalo (`/home/anierenberg/repositories/samana_dual_sources/pyHalo`)
+
+Entry point: `preset_model_from_name(name)` returns a callable; invoke as `fn(z_lens, z_source, **kwargs)` to get a `Realization`. Preset names: `CDM`, `WDM`, `WDMGeneral`, `SIDM_core_collapse`, `SIDM_parametric`, `ULDM`, `CDM_plus_BH`, etc.
+
+Key classes: `Realization` (halo population container), `LensCosmo` (`Halos/lens_cosmo.py`, lensing cosmology), `Geometry` (`Cosmology/geometry.py`, rendering volume), `HaloPopulation` (`Rendering/halo_population.py`, orchestrates SUBHALOS + LINE_OF_SIGHT + TWO_HALO).
+
+Key parameters: `sigma_sub` (subhalo abundance), `log_mlow`/`log_mhigh`/`shmf_log_slope` (mass function), `log_mc` (WDM half-mode mass), `concentration_model_subhalos/fieldhalos`, `truncation_model_subhalos/fieldhalos`, `cone_opening_angle_arcsec`, `log_m_host`.
+
+Extension points: new mass function → subclass `_PowerLawBase` in `Rendering/MassFunctions/`, register in `mass_function_models.py`; new concentration → subclass in `Halos/concentration.py`, register in `concentration_models.py`; new preset → add to `PresetModels/`, register in `preset_models.py`.
 
 ### Adding a new lens system
 
