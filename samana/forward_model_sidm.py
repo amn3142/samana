@@ -927,8 +927,10 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                               rotation_angle_list=rotation_angle_list,
                                                                               hessian_eigenvalue_list=hessian_eigenvalue_list)
         two_sources = False
+        images_1 = None
         if 'source_size_pc_2' in source_dict.keys():
             two_sources = True
+            images_1 = images
             if verbose:
                 print('computing source 2 magnifications...')
             magnifications_1 = magnifications.copy()
@@ -1147,17 +1149,25 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         from lenstronomy.Plots.model_plot import ModelPlot
         from lenstronomy.Plots import chain_plot
         import matplotlib.pyplot as plt
-        fig = plt.figure(1)
-        fig.set_size_inches(16,8)
-        ax1 = plt.subplot(141)
-        ax2 = plt.subplot(142)
-        ax3 = plt.subplot(143)
-        ax4 = plt.subplot(144)
-        axes_list = [ax1, ax2, ax3, ax4]
-        for mag, ax, image in zip(magnifications, axes_list, images):
-            ax.imshow(image, origin='lower')
-            ax.annotate('magnification: '+str(np.round(mag,2)), xy=(0.3,0.9),
-                        xycoords='axes fraction',color='w',fontsize=12)
+        if two_sources:
+            fig, axes_array = plt.subplots(2, 4, figsize=(16, 8))
+            for row, (mags_row, imgs_row, label) in enumerate(
+                    zip([magnifications[:4], magnifications[4:]],
+                        [images_1, images],
+                        ['source 1', 'source 2'])):
+                for col, (mag, image) in enumerate(zip(mags_row, imgs_row)):
+                    axes_array[row, col].imshow(image, origin='lower')
+                    axes_array[row, col].annotate(
+                        f'{label}  mag={np.round(mag, 2)}', xy=(0.05, 0.9),
+                        xycoords='axes fraction', color='w', fontsize=10)
+        else:
+            fig = plt.figure(1)
+            fig.set_size_inches(16, 8)
+            axes_list = [plt.subplot(141), plt.subplot(142), plt.subplot(143), plt.subplot(144)]
+            for mag, ax, image in zip(magnifications, axes_list, images):
+                ax.imshow(image, origin='lower')
+                ax.annotate('magnification: ' + str(np.round(mag, 2)), xy=(0.3, 0.9),
+                            xycoords='axes fraction', color='w', fontsize=12)
         plt.show()
         modelPlot = ModelPlot(data_class.kwargs_data_joint['multi_band_list'],
                               kwargs_model, kwargs_result, arrow_size=0.02, cmap_string="gist_heat",
