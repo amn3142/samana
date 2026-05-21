@@ -290,15 +290,15 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                     acceptance_ratio = accepted_realizations_counter / iteration_counter
 
                     if parameter_array is None:
-                        parameter_array = params
+                        parameter_array = params[np.newaxis, :]
                     else:
                         parameter_array = np.vstack((parameter_array, params))
                     if mags_out is None:
-                        mags_out = magnifications
+                        mags_out = np.atleast_2d(magnifications)
                     else:
                         mags_out = np.vstack((mags_out, magnifications))
                     if macromodel_samples_array is None:
-                        macromodel_samples_array = np.array(macromodel_samples)
+                        macromodel_samples_array = np.atleast_2d(np.array(macromodel_samples))
                     else:
                         macromodel_samples_array = np.vstack((macromodel_samples_array, macromodel_samples))
                     if verbose:
@@ -365,15 +365,15 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                 acceptance_ratio = accepted_realizations_counter / iteration_counter
 
                 if parameter_array is None:
-                    parameter_array = params
+                    parameter_array = params[np.newaxis, :]
                 else:
                     parameter_array = np.vstack((parameter_array, params))
                 if mags_out is None:
-                    mags_out = magnifications
+                    mags_out = np.atleast_2d(magnifications)
                 else:
                     mags_out = np.vstack((mags_out, magnifications))
                 if macromodel_samples_array is None:
-                    macromodel_samples_array = np.array(macromodel_samples)
+                    macromodel_samples_array = np.atleast_2d(np.array(macromodel_samples))
                 else:
                     macromodel_samples_array = np.vstack((macromodel_samples_array, macromodel_samples))
                 if verbose:
@@ -1139,7 +1139,7 @@ def forward_model_single_iteration(data_class,
                              'kwargs_model': kwargs_model,
                              'kwargs_params': kwargs_result}
     else:
-        if image_data_grids_computed is False and test_mode:
+        if image_data_grids_computed is False:
             kwargs_model, lens_model_init, kwargs_lens_init, index_lens_split, setup_decoupled_multiplane_lens_model_output = (
                 model_class.setup_kwargs_model(
                     decoupled_multiplane=use_decoupled_multiplane_approximation,
@@ -1180,42 +1180,45 @@ def forward_model_single_iteration(data_class,
         ax3 = plt.subplot(143)
         ax4 = plt.subplot(144)
         axes_list = [ax1, ax2, ax3, ax4]
-        for mag, ax, image in zip(magnifications, axes_list, images):
+        flux_ratios = np.array(magnifications) / np.max(np.abs(magnifications))
+        for mag, fr, ax, image in zip(magnifications, flux_ratios, axes_list, images):
             ax.imshow(image, origin='lower')
-            ax.annotate('magnification: '+str(np.round(mag,2)), xy=(0.3,0.9),
+            ax.annotate(f'mag={np.round(mag, 2)}\nFR={np.round(fr, 3)}', xy=(0.05, 0.85),
                         xycoords='axes fraction',color='w',fontsize=12)
         plt.show()
-        modelPlot = ModelPlot(data_class.kwargs_data_joint['multi_band_list'],
-                              kwargs_model, kwargs_result, arrow_size=0.02, cmap_string="gist_heat",
-                              fast_caustic=True,
-                              image_likelihood_mask_list=[data_class.likelihood_mask_imaging_weights])
+        import io, contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            modelPlot = ModelPlot(data_class.kwargs_data_joint['multi_band_list'],
+                                  kwargs_model, kwargs_result, arrow_size=0.02, cmap_string="gist_heat",
+                                  fast_caustic=True,
+                                  image_likelihood_mask_list=[data_class.likelihood_mask_imaging_weights])
         if use_imaging_data:
             chain_plot.plot_chain_list(chain_list, 0)
             print('num degrees of freedom: ', fitting_sequence.likelihoodModule.effective_num_data_points(**kwargs_result))
 
-        f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
-        modelPlot.data_plot(ax=axes[0, 0])
-        modelPlot.model_plot(ax=axes[0, 1])
-        modelPlot.normalized_residual_plot(ax=axes[0, 2], v_min=-6, v_max=6)
-        modelPlot.source_plot(ax=axes[1, 0], deltaPix_source=0.01, numPix=100)
-        modelPlot.convergence_plot(ax=axes[1, 1], v_max=1)
-        modelPlot.magnification_plot(ax=axes[1, 2])
+            f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
+            modelPlot.data_plot(ax=axes[0, 0])
+            modelPlot.model_plot(ax=axes[0, 1])
+            modelPlot.normalized_residual_plot(ax=axes[0, 2], v_min=-6, v_max=6)
+            modelPlot.source_plot(ax=axes[1, 0], deltaPix_source=0.01, numPix=100)
+            modelPlot.convergence_plot(ax=axes[1, 1], v_max=1)
+            modelPlot.magnification_plot(ax=axes[1, 2])
 
-        f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
-        modelPlot.decomposition_plot(ax=axes[0, 0], text='Lens light', lens_light_add=True, unconvolved=True)
-        modelPlot.decomposition_plot(ax=axes[1, 0], text='Lens light convolved', lens_light_add=True)
-        modelPlot.decomposition_plot(ax=axes[0, 1], text='Source light', source_add=True, unconvolved=True)
-        modelPlot.decomposition_plot(ax=axes[1, 1], text='Source light convolved', source_add=True)
-        modelPlot.decomposition_plot(ax=axes[0, 2], text='All components', source_add=True, lens_light_add=True,
-                                     unconvolved=True)
-        try:
-            modelPlot.decomposition_plot(ax=axes[1, 2], text='All components convolved', source_add=True,
-                                     lens_light_add=True, point_source_add=True)
-        except:
-            print('failed to create decomposition plot')
-        f.tight_layout()
-        f.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0., hspace=0.05)
-        plt.show()
+            f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
+            modelPlot.decomposition_plot(ax=axes[0, 0], text='Lens light', lens_light_add=True, unconvolved=True)
+            modelPlot.decomposition_plot(ax=axes[1, 0], text='Lens light convolved', lens_light_add=True)
+            modelPlot.decomposition_plot(ax=axes[0, 1], text='Source light', source_add=True, unconvolved=True)
+            modelPlot.decomposition_plot(ax=axes[1, 1], text='Source light convolved', source_add=True)
+            modelPlot.decomposition_plot(ax=axes[0, 2], text='All components', source_add=True, lens_light_add=True,
+                                         unconvolved=True)
+            try:
+                modelPlot.decomposition_plot(ax=axes[1, 2], text='All components convolved', source_add=True,
+                                         lens_light_add=True, point_source_add=True)
+            except:
+                print('failed to create decomposition plot')
+            f.tight_layout()
+            f.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0., hspace=0.05)
+            plt.show()
 
         for i in range(0, len(data_class.x_image)):
             fig = plt.figure()
