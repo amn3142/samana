@@ -201,11 +201,15 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
     while True:
 
         if isinstance(random_seed_init, list) or isinstance(random_seed_init, np.ndarray):
+            if seed_counter < len(random_seed_init):
+                random_seed = int(random_seed_init[seed_counter])
+            else:
+                random_seed = int(random_seed_init[0]) + seed_counter
+                if random_seed > 4294967295:
+                    random_seed = random_seed - 4294967296
             if verbose:
                 print('seed counter: ', seed_counter)
-                print('random seed array: ', random_seed_init)
-                print('running with random seed: ', int(random_seed_init[seed_counter]))
-            random_seed = int(random_seed_init[seed_counter])
+                print('running with random seed: ', random_seed)
         else:
             # the random seed in numpy maxes out at 4294967295
             random_seed = random_seed_init + seed_counter
@@ -893,19 +897,61 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
             return output_vector
         else:
             return output_vector_none
+
+
+
+   #print('setup decoupled multiplane')
+   #print(setup_decoupled_multiplane_lens_model_output)
+
+    #print('kwargs lens init')
+    #print(kwargs_lens_init)
+
+    #print('kwargs solution')
+    #print(kwargs_solution)
+    #print(banana)
+
     if source_plane_image_solution > 1:
         # reject this lens model on the basis of not satisfying lens equation
         if verbose:
             print('rejecting lens model on the basis of not satisfying the lens equation')
         return output_vector_none
+    
+   
     else:
         if verbose:
             print('computing image magnifications...')
+
+        # ── DEBUG: linearized image-position shift for a source perturbation ──
+        kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(data_class.z_source).value
+        r_max_arcsec = 1e-3 * 50.0 / kpc_per_arcsec  # 50 pc -> arcsec
+        r = np.random.uniform(0.0, r_max_arcsec)
+        theta = np.random.uniform(0.0, 2 * np.pi)
+        delta_sx = r * np.cos(theta)
+        delta_sy = r * np.sin(theta)
+        kwargs_full = list(kwargs_solution) + list(kwargs_lens_init[len(kwargs_solution):])
+        f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(
+            data_class.x_image, data_class.y_image, kwargs_full)
+        A11 = 1 - f_xx;  A12 = -f_xy
+        A21 = -f_yx;     A22 = 1 - f_yy
+        det_A = A11 * A22 - A12 * A21
+        delta_x_imgs = (A22 * delta_sx - A12 * delta_sy) / det_A
+        delta_y_imgs = (-A21 * delta_sx + A11 * delta_sy) / det_A
+        x_image_2 = data_class.x_image + delta_x_imgs
+        y_image_2 = data_class.y_image + delta_y_imgs
+        r_pc = r * 1e3 * kpc_per_arcsec
+        print('DEBUG source perturbation: r={:.2f} pc  delta_sx={:.4f}  delta_sy={:.4f} arcsec'.format(r_pc, delta_sx, delta_sy))
+        for i, (dx, dy) in enumerate(zip(delta_x_imgs, delta_y_imgs)):
+            print(f'  image {i}: delta_x={dx:.5f}  delta_y={dy:.5f} arcsec')
+        # ── END DEBUG ──────────────────────────────────────────────────────────
+
         source_model_quasar, kwargs_source = setup_gaussian_source(source_dict['source_size_pc'],
                                                                    np.mean(source_x), np.mean(source_y),
                                                                    astropy_cosmo, data_class.z_source)
         grid_size_base = auto_raytracing_grid_size(source_dict['source_size_pc'])
+        
+        
         grid_resolution = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc'])
+       
         if isinstance(rescale_grid_size, list) or isinstance(rescale_grid_size, np.ndarray):
             assert len(rescale_grid_size) == len(data_class.x_image)
             grid_size_list = []
@@ -913,6 +959,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 grid_size_list.append(rescale_size * grid_size_base)
         else:
             grid_size_list = [rescale_grid_size * grid_size_base] * len(data_class.x_image)
+        print(grid_size_list)
         # we pass in setup_decoupled_multiplane_lens_model_output, the decoupled multiplane parameters
         # computed for the proposed macromodel in setup_kwargs_model
         magnifications, images = model_class.image_magnification_gaussian(source_model_quasar,
@@ -935,7 +982,8 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 print('computing source 2 magnifications...')
             magnifications_1 = magnifications.copy()
             source_model_quasar_2, kwargs_source_2 = setup_gaussian_source(source_dict['source_size_pc_2'],
-                                                                           np.mean(source_x), np.mean(source_y),
+                                                                           np.mean(source_x) + delta_sx,
+                                                                           np.mean(source_y) + delta_sy,
                                                                            astropy_cosmo, data_class.z_source)
             grid_size_base_2 = auto_raytracing_grid_size(source_dict['source_size_pc_2'])
             grid_resolution_2 = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc_2'])
@@ -943,6 +991,9 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 grid_size_list_2 = [s * grid_size_base_2 for s in rescale_grid_size]
             else:
                 grid_size_list_2 = [rescale_grid_size * grid_size_base_2] * len(data_class.x_image)
+            print('rescale_grid_size')
+            print(rescale_grid_size)
+            print(grid_size_list_2)
             magnifications_2, images = model_class.image_magnification_gaussian(source_model_quasar_2,
                                                                                   kwargs_source_2,
                                                                                   lens_model_init,
@@ -953,7 +1004,18 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                                   setup_decoupled_multiplane_lens_model_output,
                                                                                   magnification_method=magnification_method,
                                                                                   rotation_angle_list=rotation_angle_list,
-                                                                                  hessian_eigenvalue_list=hessian_eigenvalue_list)
+                                                                                  hessian_eigenvalue_list=hessian_eigenvalue_list,
+                                                                                  x_image=x_image_2,
+                                                                                  y_image=y_image_2)
+            for i, img in enumerate(images):
+                npix = img.shape[0]
+                peak_idx = np.unravel_index(np.argmax(img), img.shape)
+                dist = np.sqrt((peak_idx[0] - npix/2)**2 + (peak_idx[1] - npix/2)**2)
+                frac = dist / (npix / 2)
+                if frac > 0.5:
+                    print(f'WARNING: source 2 image {i} peak at pixel {peak_idx}, '
+                          f'{frac:.2f} of half-width from center — grid may be poorly centered')
+
             magnifications = np.append(magnifications_1, magnifications_2)
         flux_uncertainty = None
         stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,

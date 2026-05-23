@@ -302,7 +302,8 @@ class EPLModelBase(object):
                                      setup_decoupled_multiplane_lens_model_output=None,
                                      magnification_method='CIRCULAR_APERTURE',
                                      rotation_angle_list=None,
-                                     hessian_eigenvalue_list=None):
+                                     hessian_eigenvalue_list=None,
+                                     x_image=None, y_image=None):
         """
 
         :param source_model_quasar:
@@ -314,11 +315,17 @@ class EPLModelBase(object):
         :param grid_resolution:
         :param setup_decoupled_multiplane_lens_model_output:
         :param magnification_method:
+        :param x_image: optional image x-positions to use as grid centers; defaults to data_class positions
+        :param y_image: optional image y-positions to use as grid centers; defaults to data_class positions
         :return:
         """
+        if x_image is None:
+            x_image = self._data.x_image
+        if y_image is None:
+            y_image = self._data.y_image
         _, _, index_lens_split, _ = self.setup_lens_model()
         mags = magnification_finite_decoupled(source_model_quasar, kwargs_source,
-                                              self._data.x_image, self._data.y_image,
+                                              x_image, y_image,
                                               lens_model_init, kwargs_lens_init,
                                               kwargs_lens, index_lens_split,
                                               grid_size_list, grid_resolution,
