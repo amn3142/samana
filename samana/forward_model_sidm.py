@@ -46,7 +46,9 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                   background_shifting=True,
                   rotation_angle_list=None,
                   hessian_eigenvalue_list=None,
-                downselect_halo_mass=None
+                downselect_halo_mass=None,
+                  n_source_2_positions=0,
+                  source2_offset_list=None,
                   ):
     """
     Top-level function for forward modeling strong lenses with substructure. This function makes repeated calls to
@@ -127,6 +129,7 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
 
     filename_parameters, filename_mags, filename_realizations, filename_sampling_rate, filename_acceptance_ratio, \
     filename_macromodel_samples = filenames(output_path, job_index)
+    filename_source2_offsets = output_path + 'job_' + str(job_index) + '/source2_offsets.txt'
     # if the required directories do not exist, create them
     if os.path.exists(output_path) is False:
         proc = subprocess.Popen(['mkdir', output_path])
@@ -145,16 +148,30 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
     if os.path.exists(filename_mags):
         _m = np.loadtxt(filename_mags)
         try:
-            n_kept = _m.shape[0]
+            n_rows = _m.shape[0]
         except:
-            n_kept = 1
-        write_param_names = False
-        write_param_names_macromodel_samples = False
+            n_rows = 1
+        n_kept = n_rows  # rows_per_sample varies with per-draw filtering; treat each row as one sample for restart
     else:
         n_kept = 0
         _m = None
-        write_param_names = True
-        write_param_names_macromodel_samples = True
+    # Each output file independently determines whether it needs a header written.
+    # This ensures no file is overwritten when restarting even if files are partially missing.
+    write_param_names = not os.path.exists(filename_parameters)
+    write_param_names_macromodel_samples = not os.path.exists(filename_macromodel_samples)
+    write_source2_offset_names = not os.path.exists(filename_source2_offsets)
+    _output_files = {
+        'fluxes.txt': os.path.exists(filename_mags),
+        'parameters.txt': os.path.exists(filename_parameters),
+        'macromodel_samples.txt': os.path.exists(filename_macromodel_samples),
+        'source2_offsets.txt': os.path.exists(filename_source2_offsets),
+    }
+    _present = [name for name, exists in _output_files.items() if exists]
+    _missing = [name for name, exists in _output_files.items() if not exists]
+    if _present and _missing:
+        print(f'WARNING: inconsistent output files for job {job_index} in {output_path}')
+        print(f'  present: {_present}')
+        print(f'  missing: {_missing}', flush=True)
     if fixed_realization_list is not None:
         if verbose:
             if len(fixed_realization_list) != n_keep:
@@ -169,11 +186,34 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
     parameter_array = None
     mags_out = None
     macromodel_samples_array = None
+    source2_offsets_array = None
     readout = False
     break_loop = False
     accepted_realizations_counter = 0
     acceptance_rate_counter = 0
     iteration_counter = 0
+    if write_source2_offset_names and n_source_2_positions >= 0:
+        n_img = len(data_class.x_image)
+        dx_names = ' '.join(f'dx_{i}' for i in range(n_img))
+        dy_names = ' '.join(f'dy_{i}' for i in range(n_img))
+        ax_names = ' '.join(f'astro_x_{i}' for i in range(n_img))
+        ay_names = ' '.join(f'astro_y_{i}' for i in range(n_img))
+        with open(filename_source2_offsets, 'w') as f:
+            f.write(f'r_pc theta delta_sx delta_sy {dx_names} {dy_names} {ax_names} {ay_names} stat\n')
+        write_source2_offset_names = False
+    if write_param_names:
+        _, _realization_samples, _realization_param_names = sample_prior(kwargs_sample_realization)
+        _, _source_samples, _source_param_names = sample_prior(kwargs_sample_source)
+        _param_names = _realization_param_names + _source_param_names + ['bic', 'summary_statistic',
+                                                                         'logL_image_data', 'source_plane_sol', 'seed']
+        with open(filename_parameters, 'w') as f:
+            f.write(' '.join(_param_names) + '\n')
+        write_param_names = False
+    if write_param_names_macromodel_samples:
+        _, _, _param_names_macro = sample_prior(kwargs_sample_fixed_macromodel)
+        with open(filename_macromodel_samples, 'w') as f:
+            f.write(' '.join(_param_names_macro) + '\n')
+        write_param_names_macromodel_samples = False
     # estimate the sampling rate (CPU minutes per realization) after this many iterations
     readout_sampling_rate_index = 10
     acceptance_ratio = np.nan
@@ -190,8 +230,8 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
     if n_keep < readout_sampling_rate_index:
         readout_sampling_rate_index = deepcopy(n_keep)
     if verbose:
-        print('starting with ' + str(n_kept) + ' samples accepted, ' + str(n_keep - n_kept) + ' remain')
-        print('existing magnifications: ', _m)
+        print('starting with ' + str(n_kept) + ' samples accepted, ' + str(n_keep - n_kept) + ' remain', flush=True)
+        print('existing magnifications: ', _m, flush=True)
         print('samples remaining: ', n_keep - n_kept)
         print('running simulation with a summary statistic tolerance of: ', tolerance)
     # start the simulation, the while loop will execute until one has obtained n_keep samples from the posterior
@@ -208,8 +248,8 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                 if random_seed > 4294967295:
                     random_seed = random_seed - 4294967296
             if verbose:
-                print('seed counter: ', seed_counter)
-                print('running with random seed: ', random_seed)
+                print('seed counter: ', seed_counter, flush=True)
+                print('running with random seed: ', random_seed, flush=True)
         else:
             # the random seed in numpy maxes out at 4294967295
             random_seed = random_seed_init + seed_counter
@@ -256,7 +296,10 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                              background_shifting,
                              rotation_angle_list,
                              hessian_eigenvalue_list,
-                             downselect_halo_mass
+                             downselect_halo_mass,
+                             10.7,
+                             n_source_2_positions,
+                             source2_offset_list,
                              ))
 
             pool = Pool(num_threads)
@@ -267,7 +310,7 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                 macromodel_samples_fixed, \
                 logL_imaging_data, fitting_sequence, stat, bic, param_names_realization,
                 param_names_source, param_names_macro, \
-                param_names_macro_fixed, _, _, _, source_plane_image_solution) = result
+                param_names_macro_fixed, _, _, _, source_plane_image_solution, source2_draws, astrometric_offsets) = result
                 acceptance_rate_counter += 1
                 seed_counter += 1
                 # Once we have computed a couple realizations, keep a log of the time it takes to run per realization
@@ -295,27 +338,36 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                                                                                   'logL_image_data', 'source_plane_sol', 'seed']
                     acceptance_ratio = accepted_realizations_counter / iteration_counter
 
-                    if parameter_array is None:
-                        parameter_array = params[np.newaxis, :]
+                    if source2_draws is not None:
+                        magnifications_1 = magnifications[:len(data_class.x_image)]
+                        astro_x, astro_y = astrometric_offsets if astrometric_offsets is not None else (np.zeros(len(data_class.x_image)), np.zeros(len(data_class.x_image)))
+                        draw_list = [(np.append(magnifications_1, mags_2),
+                                      np.concatenate([[r_pc, theta, delta_sx, delta_sy], delta_x_imgs, delta_y_imgs, astro_x, astro_y, [stat_draw]]))
+                                     for mags_2, r_pc, theta, delta_sx, delta_sy, delta_x_imgs, delta_y_imgs, _imgs, stat_draw in source2_draws]
                     else:
-                        parameter_array = np.vstack((parameter_array, params))
-                    if mags_out is None:
-                        mags_out = np.atleast_2d(magnifications)
-                    else:
-                        mags_out = np.vstack((mags_out, magnifications))
-                    if macromodel_samples_array is None:
-                        macromodel_samples_array = np.atleast_2d(np.array(macromodel_samples))
-                    else:
-                        macromodel_samples_array = np.vstack((macromodel_samples_array, macromodel_samples))
+                        draw_list = [(magnifications, None)]
+                    for row_mags, offset_row in draw_list:
+                        draw_stat = offset_row[-1] if offset_row is not None else stat
+                        if draw_stat >= tolerance:
+                            continue
+                        params_draw = params.copy()
+                        params_draw[-4] = draw_stat  # override summary_statistic with per-draw stat
+                        parameter_array = params_draw[np.newaxis, :] if parameter_array is None else np.vstack((parameter_array, params_draw))
+                        mags_out = np.atleast_2d(row_mags) if mags_out is None else np.vstack((mags_out, row_mags))
+                        macromodel_samples_array = np.atleast_2d(np.array(macromodel_samples)) if macromodel_samples_array is None else np.vstack((macromodel_samples_array, macromodel_samples))
+                        if offset_row is not None:
+                            source2_offsets_array = offset_row[np.newaxis, :] if source2_offsets_array is None else np.vstack((source2_offsets_array, offset_row))
                     if verbose:
                         print('N_kept: ', n_kept)
                         print('N remaining: ', n_keep - n_kept)
 
         else:
             scale_window_size_decoupled_multiplane = 1
+            if verbose:
+                print(f'attempt {acceptance_rate_counter + 1}  seed={random_seed}  kept={n_kept}/{n_keep}', flush=True)
             magnifications, images, realization_samples, source_samples, macromodel_samples, macromodel_samples_fixed, \
             logL_imaging_data, fitting_sequence, stat, bic, param_names_realization, param_names_source, param_names_macro, \
-            param_names_macro_fixed, _, _, _, source_plane_image_solution = forward_model_single_iteration(data_class, model, preset_model_name, kwargs_sample_realization,
+            param_names_macro_fixed, _, _, _, source_plane_image_solution, source2_draws, astrometric_offsets = forward_model_single_iteration(data_class, model, preset_model_name, kwargs_sample_realization,
                                                 kwargs_sample_source, kwargs_sample_fixed_macromodel, log_mlow_mass_sheets,
                                                 rescale_grid_size, rescale_grid_resolution, image_data_grid_resolution_rescale,
                                                 verbose, random_seed, n_pso_particles, n_pso_iterations, num_threads,
@@ -339,7 +391,10 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                                                 background_shifting,
                                                rotation_angle_list,
                                                hessian_eigenvalue_list,
-                                               downselect_halo_mass
+                                               downselect_halo_mass,
+                                               10.7,
+                                               n_source_2_positions,
+                                               source2_offset_list,
                                                )
 
             seed_counter += 1
@@ -358,6 +413,8 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
             iteration_counter += 1
             if magnifications is not None and stat < tolerance:
                 # If the statistic is less than the tolerance threshold, we keep the parameters
+                if verbose:
+                    print(f'  accepted (stat={np.round(stat, 4)})  magnifications={np.round(magnifications, 3)}', flush=True)
                 accepted_realizations_counter += 1
                 n_kept += 1
                 params = np.append(realization_samples, source_samples)
@@ -370,18 +427,25 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                                                                               'logL_image_data', 'source_plane_sol','seed']
                 acceptance_ratio = accepted_realizations_counter / iteration_counter
 
-                if parameter_array is None:
-                    parameter_array = params[np.newaxis, :]
+                if source2_draws is not None:
+                    magnifications_1 = magnifications[:len(data_class.x_image)]
+                    astro_x, astro_y = astrometric_offsets if astrometric_offsets is not None else (np.zeros(len(data_class.x_image)), np.zeros(len(data_class.x_image)))
+                    draw_list = [(np.append(magnifications_1, mags_2),
+                                  np.concatenate([[r_pc, theta, delta_sx, delta_sy], delta_x_imgs, delta_y_imgs, astro_x, astro_y, [stat_draw]]))
+                                 for mags_2, r_pc, theta, delta_sx, delta_sy, delta_x_imgs, delta_y_imgs, _imgs, stat_draw in source2_draws]
                 else:
-                    parameter_array = np.vstack((parameter_array, params))
-                if mags_out is None:
-                    mags_out = np.atleast_2d(magnifications)
-                else:
-                    mags_out = np.vstack((mags_out, magnifications))
-                if macromodel_samples_array is None:
-                    macromodel_samples_array = np.atleast_2d(np.array(macromodel_samples))
-                else:
-                    macromodel_samples_array = np.vstack((macromodel_samples_array, macromodel_samples))
+                    draw_list = [(magnifications, None)]
+                for row_mags, offset_row in draw_list:
+                    draw_stat = offset_row[-1] if offset_row is not None else stat
+                    if draw_stat >= tolerance:
+                        continue
+                    params_draw = params.copy()
+                    params_draw[-4] = draw_stat  # override summary_statistic with per-draw stat
+                    parameter_array = params_draw[np.newaxis, :] if parameter_array is None else np.vstack((parameter_array, params_draw))
+                    mags_out = np.atleast_2d(row_mags) if mags_out is None else np.vstack((mags_out, row_mags))
+                    macromodel_samples_array = np.atleast_2d(np.array(macromodel_samples)) if macromodel_samples_array is None else np.vstack((macromodel_samples_array, macromodel_samples))
+                    if offset_row is not None:
+                        source2_offsets_array = offset_row[np.newaxis, :] if source2_offsets_array is None else np.vstack((source2_offsets_array, offset_row))
                 if verbose:
                     print('N_kept: ', n_kept)
                     print('N remaining: ', n_keep - n_kept)
@@ -458,9 +522,26 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                             f.write(str(np.round(macromodel_samples_array[row, col], 5)) + ' ')
                         f.write('\n')
 
+            if source2_offsets_array is not None:
+                with open(filename_source2_offsets, 'a') as f:
+                    if write_source2_offset_names:
+                        n_img = len(data_class.x_image)
+                        dx_names   = ' '.join(f'dx_{i}'     for i in range(n_img))
+                        dy_names   = ' '.join(f'dy_{i}'     for i in range(n_img))
+                        ax_names   = ' '.join(f'astro_x_{i}' for i in range(n_img))
+                        ay_names   = ' '.join(f'astro_y_{i}' for i in range(n_img))
+                        f.write(f'r_pc theta delta_sx delta_sy {dx_names} {dy_names} {ax_names} {ay_names} stat\n')
+                        write_source2_offset_names = False
+                    nrows, ncols = int(source2_offsets_array.shape[0]), int(source2_offsets_array.shape[1])
+                    for row in range(0, nrows):
+                        for col in range(0, ncols):
+                            f.write(str(np.round(source2_offsets_array[row, col], 7)) + ' ')
+                        f.write('\n')
+
             parameter_array = None
             mags_out = None
             macromodel_samples_array = None
+            source2_offsets_array = None
 
         if break_loop:
             print('\nSIMULATION FINISHED')
@@ -496,6 +577,8 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                            hessian_eigenvalue_list=None,
                            downselect_halo_mass=None,
                             log_mhigh_mass_sheets=10.7,
+                           n_source_2_positions=0,
+                           source2_offset_list=None,
                            ):
     """
 
@@ -876,7 +959,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         print('recovered source position: ', source_x, source_y)
     # verify that the lens equation is satisfied to high precision
     source_plane_image_solution = check_lens_equation_solution(source_x, source_y, tolerance=0.0001)
-    output_vector_none = [None] * 18
+    output_vector_none = [None] * 20
     return_sampling_distribution = False
     if return_astrometric_rejections or return_sampling_distribution:
         if source_plane_image_solution > 1 or return_sampling_distribution:
@@ -893,7 +976,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                              stat, bic, realization_param_names, \
                              source_param_names, param_names_macro, \
                              param_names_macro_fixed, kwargs_model_plot, lens_model, kwargs_solution,
-                             source_plane_image_solution)
+                             source_plane_image_solution, None)
             return output_vector
         else:
             return output_vector_none
@@ -913,56 +996,27 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
     if source_plane_image_solution > 1:
         # reject this lens model on the basis of not satisfying lens equation
         if verbose:
-            print('rejecting lens model on the basis of not satisfying the lens equation')
+            print('rejecting lens model on the basis of not satisfying the lens equation', flush=True)
         return output_vector_none
     
    
     else:
         if verbose:
-            print('computing image magnifications...')
-
-        # ── DEBUG: linearized image-position shift for a source perturbation ──
-        kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(data_class.z_source).value
-        r_max_arcsec = 1e-3 * 50.0 / kpc_per_arcsec  # 50 pc -> arcsec
-        r = np.random.uniform(0.0, r_max_arcsec)
-        theta = np.random.uniform(0.0, 2 * np.pi)
-        delta_sx = r * np.cos(theta)
-        delta_sy = r * np.sin(theta)
-        kwargs_full = list(kwargs_solution) + list(kwargs_lens_init[len(kwargs_solution):])
-        f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(
-            data_class.x_image, data_class.y_image, kwargs_full)
-        A11 = 1 - f_xx;  A12 = -f_xy
-        A21 = -f_yx;     A22 = 1 - f_yy
-        det_A = A11 * A22 - A12 * A21
-        delta_x_imgs = (A22 * delta_sx - A12 * delta_sy) / det_A
-        delta_y_imgs = (-A21 * delta_sx + A11 * delta_sy) / det_A
-        x_image_2 = data_class.x_image + delta_x_imgs
-        y_image_2 = data_class.y_image + delta_y_imgs
-        r_pc = r * 1e3 * kpc_per_arcsec
-        print('DEBUG source perturbation: r={:.2f} pc  delta_sx={:.4f}  delta_sy={:.4f} arcsec'.format(r_pc, delta_sx, delta_sy))
-        for i, (dx, dy) in enumerate(zip(delta_x_imgs, delta_y_imgs)):
-            print(f'  image {i}: delta_x={dx:.5f}  delta_y={dy:.5f} arcsec')
-        # ── END DEBUG ──────────────────────────────────────────────────────────
+            print('computing image magnifications...', flush=True)
 
         source_model_quasar, kwargs_source = setup_gaussian_source(source_dict['source_size_pc'],
                                                                    np.mean(source_x), np.mean(source_y),
                                                                    astropy_cosmo, data_class.z_source)
         grid_size_base = auto_raytracing_grid_size(source_dict['source_size_pc'])
-        
-        
         grid_resolution = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc'])
-       
         if isinstance(rescale_grid_size, list) or isinstance(rescale_grid_size, np.ndarray):
             assert len(rescale_grid_size) == len(data_class.x_image)
-            grid_size_list = []
-            for rescale_size in rescale_grid_size:
-                grid_size_list.append(rescale_size * grid_size_base)
+            grid_size_list = [s * grid_size_base for s in rescale_grid_size]
         else:
             grid_size_list = [rescale_grid_size * grid_size_base] * len(data_class.x_image)
-        print(grid_size_list)
         # we pass in setup_decoupled_multiplane_lens_model_output, the decoupled multiplane parameters
         # computed for the proposed macromodel in setup_kwargs_model
-        magnifications, images = model_class.image_magnification_gaussian(source_model_quasar,
+        magnifications_1, images = model_class.image_magnification_gaussian(source_model_quasar,
                                                                               kwargs_source,
                                                                               lens_model_init,
                                                                               kwargs_lens_init,
@@ -974,53 +1028,105 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                               rotation_angle_list=rotation_angle_list,
                                                                               hessian_eigenvalue_list=hessian_eigenvalue_list)
         two_sources = False
-        images_1 = None
+        images_1 = images
+        source2_draws = None
+
         if 'source_size_pc_2' in source_dict.keys():
             two_sources = True
-            images_1 = images
             if verbose:
                 print('computing source 2 magnifications...')
-            magnifications_1 = magnifications.copy()
-            source_model_quasar_2, kwargs_source_2 = setup_gaussian_source(source_dict['source_size_pc_2'],
-                                                                           np.mean(source_x) + delta_sx,
-                                                                           np.mean(source_y) + delta_sy,
-                                                                           astropy_cosmo, data_class.z_source)
+
+            # Jacobian for source-plane -> image-plane mapping (computed once for all draws)
+            kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(data_class.z_source).value
+            r_max_arcsec = 1e-3 * 50.0 / kpc_per_arcsec  # 50 pc -> arcsec
+            kwargs_full = list(kwargs_solution) + list(kwargs_lens_init[len(kwargs_solution):])
+            f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(
+                data_class.x_image, data_class.y_image, kwargs_full)
+            A11 = 1 - f_xx;  A12 = -f_xy
+            A21 = -f_yx;     A22 = 1 - f_yy
+            det_A = A11 * A22 - A12 * A21
+
+            # Grid setup for source 2 (computed once)
             grid_size_base_2 = auto_raytracing_grid_size(source_dict['source_size_pc_2'])
             grid_resolution_2 = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc_2'])
             if isinstance(rescale_grid_size, list) or isinstance(rescale_grid_size, np.ndarray):
                 grid_size_list_2 = [s * grid_size_base_2 for s in rescale_grid_size]
             else:
                 grid_size_list_2 = [rescale_grid_size * grid_size_base_2] * len(data_class.x_image)
-            print('rescale_grid_size')
-            print(rescale_grid_size)
-            print(grid_size_list_2)
-            magnifications_2, images = model_class.image_magnification_gaussian(source_model_quasar_2,
-                                                                                  kwargs_source_2,
-                                                                                  lens_model_init,
-                                                                                  kwargs_lens_init,
-                                                                                  kwargs_solution,
-                                                                                  grid_size_list_2,
-                                                                                  grid_resolution_2,
-                                                                                  setup_decoupled_multiplane_lens_model_output,
-                                                                                  magnification_method=magnification_method,
-                                                                                  rotation_angle_list=rotation_angle_list,
-                                                                                  hessian_eigenvalue_list=hessian_eigenvalue_list,
-                                                                                  x_image=x_image_2,
-                                                                                  y_image=y_image_2)
-            for i, img in enumerate(images):
-                npix = img.shape[0]
-                peak_idx = np.unravel_index(np.argmax(img), img.shape)
-                dist = np.sqrt((peak_idx[0] - npix/2)**2 + (peak_idx[1] - npix/2)**2)
-                frac = dist / (npix / 2)
-                if frac > 0.5:
-                    print(f'WARNING: source 2 image {i} peak at pixel {peak_idx}, '
-                          f'{frac:.2f} of half-width from center — grid may be poorly centered')
 
-            magnifications = np.append(magnifications_1, magnifications_2)
-        flux_uncertainty = None
-        stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
+            if source2_offset_list is not None:
+                # Zero-offset draw first, then fixed offsets: list of (r_pc, theta) tuples
+                draw_offsets_polar = [(0.0, 0.0)] + [(1e-3 * r_pc / kpc_per_arcsec, theta)
+                                                      for r_pc, theta in source2_offset_list]
+            else:
+                # Zero-offset draw first, then n_source_2_positions random draws
+                draw_offsets_polar = [(0.0, 0.0)]
+                for _ in range(n_source_2_positions):
+                    draw_offsets_polar.append((
+                        np.random.uniform(0.0, r_max_arcsec),
+                        np.random.uniform(0.0, 2 * np.pi)
+                    ))
+
+            source2_draws = []
+            for k, (r_arcsec, theta) in enumerate(draw_offsets_polar):
+                delta_sx = r_arcsec * np.cos(theta)
+                delta_sy = r_arcsec * np.sin(theta)
+                delta_x_imgs = (A22 * delta_sx - A12 * delta_sy) / det_A
+                delta_y_imgs = (-A21 * delta_sx + A11 * delta_sy) / det_A
+                x_image_2 = data_class.x_image + delta_x_imgs
+                y_image_2 = data_class.y_image + delta_y_imgs
+                r_pc = r_arcsec * 1e3 * kpc_per_arcsec
+                if verbose:
+                    print(f'  source2 draw {k}: r={r_pc:.2f} pc  theta={np.degrees(theta):.1f} deg')
+                    for i, (xi, yi, dx, dy) in enumerate(zip(x_image_2, y_image_2, delta_x_imgs, delta_y_imgs)):
+                        print(f'    image {i}: x={xi:.5f}  y={yi:.5f}  dx={dx:.5f}  dy={dy:.5f} arcsec')
+
+                source_model_quasar_2, kwargs_source_2 = setup_gaussian_source(
+                    source_dict['source_size_pc_2'],
+                    np.mean(source_x) + delta_sx,
+                    np.mean(source_y) + delta_sy,
+                    astropy_cosmo, data_class.z_source)
+
+                mags_2, images_2 = model_class.image_magnification_gaussian(
+                    source_model_quasar_2, kwargs_source_2,
+                    lens_model_init, kwargs_lens_init, kwargs_solution,
+                    grid_size_list_2, grid_resolution_2,
+                    setup_decoupled_multiplane_lens_model_output,
+                    magnification_method=magnification_method,
+                    rotation_angle_list=rotation_angle_list,
+                    hessian_eigenvalue_list=hessian_eigenvalue_list,
+                    x_image=x_image_2, y_image=y_image_2)
+
+                if k == 0:
+                    images = images_2  # zero-offset draw images for test_mode display
+
+                mags_combined = np.append(magnifications_1, mags_2)
+                stat_draw, _, _ = flux_ratio_summary_statistic(data_class.magnifications,
+                                                               mags_combined,
+                                                               None,
+                                                               data_class.keep_flux_ratio_index,
+                                                               data_class.uncertainty_in_fluxes)
+                if verbose:
+                    m1 = np.array(magnifications_1)
+                    m2 = np.array(mags_2)
+                    fr1 = m1[1:] / m1[0]
+                    fr2 = m2[1:] / m2[0]
+                    print(f'    src1  model FR={np.round(fr1, 3)}')
+                    print(f'    src2  model FR={np.round(fr2, 3)}')
+                    print(f'    stat={np.round(stat_draw, 4)}', flush=True)
+                source2_draws.append((np.array(mags_2), r_pc, theta, delta_sx, delta_sy, delta_x_imgs, delta_y_imgs, images_2, stat_draw))
+
+            # use zero-offset draw for realization acceptance
+            magnifications = np.append(magnifications_1, source2_draws[0][0])
+        else:
+            magnifications = magnifications_1
+        if source2_draws is not None:
+            stat = source2_draws[0][8]  # zero-offset draw stat already computed in loop
+        else:
+            flux_uncertainty = None
+            stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
                                                                                magnifications,
-                                                                                flux_uncertainty,
+                                                                               flux_uncertainty,
                                                                                data_class.keep_flux_ratio_index,
                                                                                data_class.uncertainty_in_fluxes)
 
@@ -1212,17 +1318,27 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         from lenstronomy.Plots import chain_plot
         import matplotlib.pyplot as plt
         if two_sources:
-            fig, axes_array = plt.subplots(2, 4, figsize=(16, 8))
-            for row, (mags_row, imgs_row, label) in enumerate(
-                    zip([magnifications[:4], magnifications[4:]],
-                        [images_1, images],
-                        ['source 1', 'source 2'])):
-                fr_row = np.array(mags_row) / np.max(np.abs(mags_row))
-                for col, (mag, fr, image) in enumerate(zip(mags_row, fr_row, imgs_row)):
-                    axes_array[row, col].imshow(image, origin='lower')
-                    axes_array[row, col].annotate(
+            n_rows_plot = 1 + len(source2_draws)  # source 1 + one row per source-2 draw
+            fig, axes_array = plt.subplots(n_rows_plot, 4, figsize=(16, 4 * n_rows_plot))
+            if n_rows_plot == 1:
+                axes_array = axes_array[np.newaxis, :]
+            # source 1 row
+            mags_1 = magnifications[:4]
+            fr_1 = np.array(mags_1) / np.max(np.abs(mags_1))
+            for col, (mag, fr, image) in enumerate(zip(mags_1, fr_1, images_1)):
+                axes_array[0, col].imshow(image, origin='lower')
+                axes_array[0, col].annotate(
+                    f'src1  mag={np.round(mag, 2)}  FR={np.round(fr, 3)}', xy=(0.05, 0.9),
+                    xycoords='axes fraction', color='w', fontsize=9)
+            # one row per source-2 draw
+            for draw_idx, (mags_2, r_pc, theta, delta_sx, delta_sy, delta_x_imgs, delta_y_imgs, images_2_draw, stat_draw) in enumerate(source2_draws):
+                fr_2 = np.array(mags_2) / np.max(np.abs(mags_2))
+                label = f'src2  r={np.round(r_pc, 1)}pc  θ={np.round(np.degrees(theta), 0):.0f}°  stat={np.round(stat_draw, 3)}'
+                for col, (mag, fr, image) in enumerate(zip(mags_2, fr_2, images_2_draw)):
+                    axes_array[draw_idx + 1, col].imshow(image, origin='lower')
+                    axes_array[draw_idx + 1, col].annotate(
                         f'{label}  mag={np.round(mag, 2)}  FR={np.round(fr, 3)}', xy=(0.05, 0.9),
-                        xycoords='axes fraction', color='w', fontsize=10)
+                        xycoords='axes fraction', color='w', fontsize=9)
         else:
             flux_ratios = np.array(magnifications) / np.max(np.abs(magnifications))
             fig = plt.figure(1)
@@ -1315,5 +1431,6 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
            logL_imaging_data, fitting_sequence, \
            stat, bic, realization_param_names, \
            source_param_names, param_names_macro, \
-           param_names_macro_fixed, kwargs_model_plot, lens_model, kwargs_solution, source_plane_image_solution)
+           param_names_macro_fixed, kwargs_model_plot, lens_model, kwargs_solution, source_plane_image_solution,
+           source2_draws, (delta_x_image, delta_y_image))
     return output_vector
