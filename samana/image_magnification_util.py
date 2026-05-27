@@ -7,6 +7,13 @@ from lenstronomy.LensModel.lens_model_extensions import LensModelExtensions
 from lenstronomy.Util import util
 from lenstronomy.Util.util import make_grid_with_coordtransform
 from lenstronomy.Data.coord_transforms import Coordinates
+import math as _math
+
+try:
+    from numba import njit as _njit
+    _NUMBA_AVAILABLE = True
+except ImportError:
+    _NUMBA_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Vectorized TNFW ray-shooting helpers
@@ -129,6 +136,85 @@ def _batch_pm_alpha(theta_x, theta_y, theta_E, cx, cy):
     r2 = np.maximum(x_ ** 2 + y_ ** 2, _PM_S ** 2)
     te2 = theta_E[:, None] ** 2            # (N, 1)
     return np.sum(te2 * x_ / r2, axis=0), np.sum(te2 * y_ / r2, axis=0)
+
+
+if _NUMBA_AVAILABLE:
+    @_njit(cache=True)
+    def _F_scalar_nb(x):
+        if x < 1.0:
+            s = _math.sqrt(max(1.0 - x * x, 1e-12))
+            return _math.atanh(s) / s
+        elif x > 1.0:
+            s = _math.sqrt(max(x * x - 1.0, 1e-12))
+            return _math.atan(s) / s
+        else:
+            return 1.0
+
+    @_njit(cache=True)
+    def _g_scalar_nb(xi, tau):
+        # scalar TNFW g-function; xi >= _TNFW_S guaranteed by caller
+        F = _F_scalar_nb(xi)
+        L = _math.log(xi / (tau + _math.sqrt(tau * tau + xi * xi)))
+        tau2 = tau * tau
+        coeff = tau2 / ((tau2 + 1.0) * (tau2 + 1.0))
+        return coeff * (
+            (tau2 + 1.0 + 2.0 * (xi * xi - 1.0)) * F
+            + tau * _math.pi
+            + (tau2 - 1.0) * _math.log(tau)
+            + _math.sqrt(tau2 + xi * xi) * (-_math.pi + L * (tau2 - 1.0) / tau)
+        )
+
+    @_njit(cache=True)
+    def _batch_tnfw_alpha_nb(theta_x, theta_y, Rs, rho0, r_trunc, cx, cy):
+        M = theta_x.shape[0]
+        N = Rs.shape[0]
+        alpha_x = np.zeros(M)
+        alpha_y = np.zeros(M)
+        for n in range(N):
+            rs_n = Rs[n]
+            rho0_n = rho0[n]
+            tau_n = r_trunc[n] / rs_n
+            cx_n = cx[n]
+            cy_n = cy[n]
+            s_min = _TNFW_S * rs_n
+            for m in range(M):
+                dx = theta_x[m] - cx_n
+                dy = theta_y[m] - cy_n
+                R = _math.sqrt(dx * dx + dy * dy)
+                if R < s_min:
+                    R = s_min
+                xi = R / rs_n
+                if xi < _TNFW_S:
+                    xi = _TNFW_S
+                gx = _g_scalar_nb(xi, tau_n)
+                a = 4.0 * rho0_n * rs_n * gx / (xi * xi)
+                alpha_x[m] += a * dx
+                alpha_y[m] += a * dy
+        return alpha_x, alpha_y
+
+    @_njit(cache=True)
+    def _batch_pm_alpha_nb(theta_x, theta_y, theta_E, cx, cy):
+        M = theta_x.shape[0]
+        N = theta_E.shape[0]
+        alpha_x = np.zeros(M)
+        alpha_y = np.zeros(M)
+        _PM_S2 = 1e-50  # _PM_S ** 2
+        for n in range(N):
+            te2 = theta_E[n] * theta_E[n]
+            cx_n = cx[n]
+            cy_n = cy[n]
+            for m in range(M):
+                dx = theta_x[m] - cx_n
+                dy = theta_y[m] - cy_n
+                r2 = dx * dx + dy * dy
+                if r2 < _PM_S2:
+                    r2 = _PM_S2
+                alpha_x[m] += te2 * dx / r2
+                alpha_y[m] += te2 * dy / r2
+        return alpha_x, alpha_y
+
+    _batch_tnfw_alpha = _batch_tnfw_alpha_nb
+    _batch_pm_alpha = _batch_pm_alpha_nb
 
 
 def _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed):
