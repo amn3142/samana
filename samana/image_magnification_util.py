@@ -7,6 +7,201 @@ from lenstronomy.Util import util
 from lenstronomy.Util.util import make_grid_with_coordtransform
 from lenstronomy.Data.coord_transforms import Coordinates
 
+# ---------------------------------------------------------------------------
+# Vectorized TNFW ray-shooting helpers
+# ---------------------------------------------------------------------------
+_TNFW_S = 0.001  # softening scale matching lenstronomy's TNFW._s
+
+
+def _F_vec(x):
+    safe_sub = np.maximum(1.0 - x ** 2, 1e-12)
+    safe_sup = np.maximum(x ** 2 - 1.0, 1e-12)
+    val_sub = np.arctanh(np.sqrt(safe_sub)) / np.sqrt(safe_sub)
+    val_sup = np.arctan(np.sqrt(safe_sup)) / np.sqrt(safe_sup)
+    return np.where(x < 1.0, val_sub, np.where(x > 1.0, val_sup, 1.0))
+
+
+def _L_vec(x, tau):
+    x = np.maximum(x, _TNFW_S)
+    return np.log(x / (tau + np.sqrt(tau ** 2 + x ** 2)))
+
+
+def _g_vec(x, tau):
+    x = np.maximum(x, _TNFW_S)
+    F = _F_vec(x)
+    L = _L_vec(x, tau)
+    return (
+        tau ** 2 * (tau ** 2 + 1.0) ** -2
+        * (
+            (tau ** 2 + 1.0 + 2.0 * (x ** 2 - 1.0)) * F
+            + tau * np.pi
+            + (tau ** 2 - 1.0) * np.log(tau)
+            + np.sqrt(tau ** 2 + x ** 2) * (-np.pi + L * (tau ** 2 - 1.0) / tau)
+        )
+    )
+
+
+def _alpha2rho0(alpha_Rs, Rs):
+    return alpha_Rs / (4.0 * Rs ** 2 * (1.0 + np.log(0.5)))
+
+
+def _batch_tnfw_alpha(theta_x, theta_y, Rs, rho0, r_trunc, cx, cy):
+    """Sum TNFW deflections for N halos at M pixel positions in one numpy call.
+
+    theta_x, theta_y : (M,) pixel angular positions [arcsec]
+    Rs, rho0, r_trunc, cx, cy : (N,) halo parameters
+    Returns alpha_x_sum, alpha_y_sum each of shape (M,)
+    """
+    x_ = theta_x[None, :] - cx[:, None]   # (N, M)
+    y_ = theta_y[None, :] - cy[:, None]   # (N, M)
+    R = np.sqrt(x_ ** 2 + y_ ** 2)
+    R = np.maximum(R, _TNFW_S * Rs[:, None])
+    xi = np.maximum(R / Rs[:, None], _TNFW_S)
+    tau = (r_trunc / Rs)[:, None]          # (N, 1)
+    gx = _g_vec(xi, tau)                   # (N, M)
+    a = 4.0 * rho0[:, None] * Rs[:, None] * gx / xi ** 2
+    return np.sum(a * x_, axis=0), np.sum(a * y_, axis=0)
+
+
+def _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed):
+    """Preprocess redshift planes for vectorised ray-shooting.
+
+    Returns a list of per-z-plane dicts with:
+      tnfw_batch : dict of stacked TNFW params (or None if no TNFW in plane)
+      other_k   : list of halo indices for non-TNFW profiles
+    """
+    mpb = lens_model_fixed.lens_model._multi_plane_base
+    sorted_idx = list(mpb._sorted_redshift_index)
+    redshift_list = mpb._lens_redshift_list
+    T_z_list = mpb._T_z_list
+    r2p_list = mpb._reduced2physical_factor
+    func_list = mpb.func_list
+    T_ij_list = mpb._T_ij_list
+
+    groups = []
+    i = 0
+    n = len(sorted_idx)
+    while i < n:
+        k0 = sorted_idx[i]
+        z_current = float(redshift_list[k0])
+        j = i + 1
+        while j < n and abs(float(redshift_list[sorted_idx[j]]) - z_current) < 1e-8:
+            j += 1
+
+        tnfw_k, other_k = [], []
+        for m in range(i, j):
+            km = sorted_idx[m]
+            if type(func_list[km]).__name__ == 'TNFW':
+                tnfw_k.append(km)
+            else:
+                other_k.append(km)
+
+        tnfw_batch = None
+        if tnfw_k:
+            Rs = np.array([kwargs_lens_fixed[k]['Rs'] for k in tnfw_k])
+            alpha_Rs_arr = np.array([kwargs_lens_fixed[k]['alpha_Rs'] for k in tnfw_k])
+            r_trunc = np.array([kwargs_lens_fixed[k]['r_trunc'] for k in tnfw_k])
+            cx = np.array([kwargs_lens_fixed[k].get('center_x', 0.0) for k in tnfw_k])
+            cy = np.array([kwargs_lens_fixed[k].get('center_y', 0.0) for k in tnfw_k])
+            tnfw_batch = {
+                'Rs': Rs, 'rho0': _alpha2rho0(alpha_Rs_arr, Rs),
+                'r_trunc': r_trunc, 'cx': cx, 'cy': cy,
+            }
+
+        groups.append({
+            'z': z_current,
+            'T_z': float(T_z_list[i]),
+            'r2p': float(r2p_list[i]),
+            'delta_T_stored': float(T_ij_list[i]),
+            'tnfw_batch': tnfw_batch,
+            'other_k': other_k,
+        })
+        i = j
+    return groups
+
+
+def _fast_ray_shoot(mpb, groups, kwargs_lens_fixed, x, y, alpha_x, alpha_y, z_start, z_stop):
+    """Vectorised replacement for ray_shooting_partial_comoving."""
+    x = np.atleast_1d(np.array(x, dtype=float))
+    y = np.atleast_1d(np.array(y, dtype=float))
+    alpha_x = np.atleast_1d(np.array(alpha_x, dtype=float))
+    alpha_y = np.atleast_1d(np.array(alpha_y, dtype=float))
+    z_lens_last = z_start
+    first_deflector = True
+
+    for group in groups:
+        z_lens = group['z']
+        if z_lens <= z_start or z_lens > z_stop:
+            continue
+
+        if first_deflector:
+            delta_T = (group['delta_T_stored'] if z_start == 0.0
+                       else float(mpb._cosmo_bkg.T_xy(z_start, z_lens)))
+            first_deflector = False
+        else:
+            delta_T = group['delta_T_stored']
+
+        x = x + alpha_x * delta_T
+        y = y + alpha_y * delta_T
+        T_z = group['T_z']
+        theta_x = x / T_z
+        theta_y = y / T_z
+        r2p = group['r2p']
+
+        if group['tnfw_batch'] is not None:
+            b = group['tnfw_batch']
+            ax, ay = _batch_tnfw_alpha(theta_x, theta_y,
+                                       b['Rs'], b['rho0'], b['r_trunc'], b['cx'], b['cy'])
+            alpha_x = alpha_x - ax * r2p
+            alpha_y = alpha_y - ay * r2p
+
+        for k in group['other_k']:
+            ax, ay = mpb.func_list[k].derivatives(theta_x, theta_y, **kwargs_lens_fixed[k])
+            alpha_x = alpha_x - ax * r2p
+            alpha_y = alpha_y - ay * r2p
+
+        z_lens_last = z_lens
+
+    delta_T_end = (0.0 if z_lens_last == z_stop
+                   else float(mpb._cosmo_bkg.T_xy(z_lens_last, z_stop)))
+    x = x + alpha_x * delta_T_end
+    y = y + alpha_y * delta_T_end
+    return np.asarray(x), np.asarray(y), np.asarray(alpha_x), np.asarray(alpha_y)
+
+
+def _fast_coords_and_deflections(
+    lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+    x_pts, y_pts, z_split, z_source, cosmo_bkg, groups,
+):
+    """Vectorised replacement for coordinates_and_deflections."""
+    mpb = lens_model_fixed.lens_model._multi_plane_base
+    Tds = cosmo_bkg.T_xy(z_split, z_source)
+    Td = cosmo_bkg.T_xy(0, z_split)
+    reduced_to_phys = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
+
+    x_main, y_main, ax_fg, ay_fg = _fast_ray_shoot(
+        mpb, groups, kwargs_lens_fixed,
+        np.zeros_like(np.atleast_1d(np.asarray(x_pts, dtype=float))),
+        np.zeros_like(np.atleast_1d(np.asarray(y_pts, dtype=float))),
+        x_pts, y_pts, 0.0, z_split,
+    )
+
+    ax_main, ay_main = lens_model_free.alpha(x_main / Td, y_main / Td, kwargs_lens_free)
+    ax_main *= reduced_to_phys
+    ay_main *= reduced_to_phys
+
+    angle_x = ax_fg - ax_main
+    angle_y = ay_fg - ay_main
+
+    x_src, y_src, _, _ = _fast_ray_shoot(
+        mpb, groups, kwargs_lens_fixed,
+        x_main, y_main, angle_x, angle_y, z_split, z_source,
+    )
+
+    ax_bg = (x_src - x_main) / Tds - angle_x
+    ay_bg = (y_src - y_main) / Tds - angle_y
+    return x_main, y_main, ax_fg, ay_fg, ax_bg, ay_bg
+
 
 def perturbed_flux_ratios_from_flux_ratios(flux_ratios, flux_ratio_measurement_uncertainties_percentage):
     """
@@ -96,6 +291,7 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
     else:
         (lens_model_fixed, lens_model_free, kwargs_lens_fixed,
          kwargs_lens_free, z_source, z_split, cosmo_bkg) = setup_decoupled_multiplane_lens_model_output
+    groups = _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed)
     magnifications = []
     flux_arrays = []
 
@@ -129,7 +325,8 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
                                                       kwargs_lens_fixed,
                                                       kwargs_lens_free, kwargs_lens, z_split, z_source,
                                                       cosmo_bkg, x_img, y_img, grid_x_large, grid_y_large,
-                                                      grid_r, r_step, grid_resolution, grid_size_list[j], z_split, z_source)
+                                                      grid_r, r_step, grid_resolution, grid_size_list[j], z_split, z_source,
+                                                      groups=groups)
             magnifications.append(mag)
             flux_arrays.append(flux_array.reshape(npix_large, npix_large))
         else:
@@ -331,7 +528,7 @@ def decoupled_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
                                      lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
                                      z_split, z_source, cosmo_bkg, xD, yD, alpha_x_foreground, alpha_y_foreground,
                                      alpha_x_background, alpha_y_background, Td, kwargs_lens, reduced_to_phys,
-                                     Ts, Tds):
+                                     Ts, Tds, groups=None):
     """
     Ray propagation and image flux calculation with the decoupled multiplane formalism
     :param grid_r:
@@ -368,9 +565,14 @@ def decoupled_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
     y_points_temp = grid_y_large[inds_compute] + y_image
 
     # compute lensing stuff at these coordinates
-    _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
-        coordinates_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
-                                    x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg)
+    if groups is not None:
+        _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
+            _fast_coords_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                        x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg, groups)
+    else:
+        _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
+            coordinates_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                        x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg)
     # update the master grids with the new information
     xD[inds_compute] = _xD
     yD[inds_compute] = _yD
@@ -405,7 +607,7 @@ def decoupled_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
 def mag_finite_single_image(source_model, kwargs_source, lens_model_fixed, lens_model_free, kwargs_lens_fixed,
                             kwargs_lens_free, kwargs_lens, z_split, z_source,
                             cosmo_bkg, x_image, y_image, grid_x_large, grid_y_large,
-                            grid_r, r_step, grid_resolution, grid_size_max, zlens, zsource):
+                            grid_r, r_step, grid_resolution, grid_size_max, zlens, zsource, groups=None):
     """
     Compute the magnification of a single lensed image with the decoupled multiplane formalism
     :param source_model:
@@ -455,7 +657,7 @@ def mag_finite_single_image(source_model, kwargs_source, lens_model_fixed, lens_
                                      lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
                                      z_split, z_source, cosmo_bkg, xD, yD, alpha_x_foreground, alpha_y_foreground,
                                      alpha_x_background, alpha_y_background, Td, kwargs_lens, reduced_to_phys,
-                                     Ts, Tds)
+                                     Ts, Tds, groups=groups)
 
         sb = source_model.surface_brightness(beta_x, beta_y, kwargs_source)
         flux_array[inds_computed] = sb
