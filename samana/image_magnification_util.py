@@ -1,5 +1,6 @@
 from lenstronomy.LensModel.Util.decouple_multi_plane_util import setup_grids, coordinates_and_deflections, setup_lens_model
 import numpy as np
+from scipy.special import hyp2f1 as _hyp2f1, beta as _sp_beta
 from lenstronomy.LightModel.light_model import LightModel
 from copy import deepcopy
 from lenstronomy.LensModel.lens_model_extensions import LensModelExtensions
@@ -63,6 +64,73 @@ def _batch_tnfw_alpha(theta_x, theta_y, Rs, rho0, r_trunc, cx, cy):
     return np.sum(a * x_, axis=0), np.sum(a * y_, axis=0)
 
 
+# ---------------------------------------------------------------------------
+# Vectorized PSEUDO_DPL (PseudoDoublePowerlaw) helpers
+# ---------------------------------------------------------------------------
+
+def _g_pdpl_vec(X, g, n):
+    """Vectorized _g for PSEUDO_DPL.
+
+    X: (N, M), g: (N, 1), n: (N, 1)
+    Returns (N, M)
+    """
+    n = np.where(np.abs(n - 3.0) < 1e-6, 3.001, n)
+    xi = 1.0 + X ** 2
+    a = (n - 3.0) / 2.0
+    b = g / 2.0
+    c = n / 2.0
+    hyp_term = _hyp2f1(a, b, c, 1.0 / xi)
+    beta1 = _sp_beta(a, (3.0 - g) / 2.0)
+    beta2 = _sp_beta(a, 1.5)
+    return 0.5 * (beta1 - beta2 * hyp_term * xi ** ((3.0 - n) / 2.0))
+
+
+def _alpha2rho0_pdpl(alpha_Rs, Rs, gamma_inner, gamma_outer):
+    """Convert alpha_Rs to rho0 for PSEUDO_DPL.  All inputs: (N,)"""
+    gx = _g_pdpl_vec(
+        np.ones((len(Rs), 1)),
+        gamma_inner[:, None],
+        gamma_outer[:, None],
+    )[:, 0]
+    return alpha_Rs / (4.0 * Rs ** 2 * gx)
+
+
+def _batch_pdpl_alpha(theta_x, theta_y, Rs, rho0, gamma_inner, gamma_outer, cx, cy):
+    """Sum PSEUDO_DPL deflections for N halos at M pixel positions.
+
+    theta_x, theta_y : (M,)
+    Rs, rho0, gamma_inner, gamma_outer, cx, cy : (N,)
+    Returns alpha_x_sum, alpha_y_sum each of shape (M,)
+    """
+    x_ = theta_x[None, :] - cx[:, None]   # (N, M)
+    y_ = theta_y[None, :] - cy[:, None]   # (N, M)
+    R = np.maximum(np.sqrt(x_ ** 2 + y_ ** 2), 1e-8)
+    xi = np.maximum(R / Rs[:, None], 1e-8)   # X = R/Rs, (N, M)
+    gx = _g_pdpl_vec(xi, gamma_inner[:, None], gamma_outer[:, None])   # (N, M)
+    a = 4.0 * rho0[:, None] * Rs[:, None] * gx / xi ** 2   # (N, M)
+    return np.sum(a * x_, axis=0), np.sum(a * y_, axis=0)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized PointMass helpers
+# ---------------------------------------------------------------------------
+_PM_S = 1e-25
+
+
+def _batch_pm_alpha(theta_x, theta_y, theta_E, cx, cy):
+    """Sum PointMass deflections for N halos at M pixel positions.
+
+    theta_x, theta_y : (M,)
+    theta_E, cx, cy : (N,)
+    Returns alpha_x_sum, alpha_y_sum each of shape (M,)
+    """
+    x_ = theta_x[None, :] - cx[:, None]   # (N, M)
+    y_ = theta_y[None, :] - cy[:, None]   # (N, M)
+    r2 = np.maximum(x_ ** 2 + y_ ** 2, _PM_S ** 2)
+    te2 = theta_E[:, None] ** 2            # (N, 1)
+    return np.sum(te2 * x_ / r2, axis=0), np.sum(te2 * y_ / r2, axis=0)
+
+
 def _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed):
     """Preprocess redshift planes for vectorised ray-shooting.
 
@@ -88,11 +156,16 @@ def _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed):
         while j < n and abs(float(redshift_list[sorted_idx[j]]) - z_current) < 1e-8:
             j += 1
 
-        tnfw_k, other_k = [], []
+        tnfw_k, pdpl_k, pm_k, other_k = [], [], [], []
         for m in range(i, j):
             km = sorted_idx[m]
-            if type(func_list[km]).__name__ == 'TNFW':
+            cname = type(func_list[km]).__name__
+            if cname == 'TNFW':
                 tnfw_k.append(km)
+            elif cname == 'PseudoDoublePowerlaw':
+                pdpl_k.append(km)
+            elif cname == 'PointMass':
+                pm_k.append(km)
             else:
                 other_k.append(km)
 
@@ -108,12 +181,35 @@ def _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed):
                 'r_trunc': r_trunc, 'cx': cx, 'cy': cy,
             }
 
+        pdpl_batch = None
+        if pdpl_k:
+            Rs = np.array([kwargs_lens_fixed[k]['Rs'] for k in pdpl_k])
+            alpha_Rs_arr = np.array([kwargs_lens_fixed[k]['alpha_Rs'] for k in pdpl_k])
+            gamma_inner = np.array([kwargs_lens_fixed[k]['gamma_inner'] for k in pdpl_k])
+            gamma_outer = np.array([kwargs_lens_fixed[k]['gamma_outer'] for k in pdpl_k])
+            cx = np.array([kwargs_lens_fixed[k].get('center_x', 0.0) for k in pdpl_k])
+            cy = np.array([kwargs_lens_fixed[k].get('center_y', 0.0) for k in pdpl_k])
+            pdpl_batch = {
+                'Rs': Rs, 'rho0': _alpha2rho0_pdpl(alpha_Rs_arr, Rs, gamma_inner, gamma_outer),
+                'gamma_inner': gamma_inner, 'gamma_outer': gamma_outer,
+                'cx': cx, 'cy': cy,
+            }
+
+        pm_batch = None
+        if pm_k:
+            theta_E = np.array([kwargs_lens_fixed[k]['theta_E'] for k in pm_k])
+            cx = np.array([kwargs_lens_fixed[k].get('center_x', 0.0) for k in pm_k])
+            cy = np.array([kwargs_lens_fixed[k].get('center_y', 0.0) for k in pm_k])
+            pm_batch = {'theta_E': theta_E, 'cx': cx, 'cy': cy}
+
         groups.append({
             'z': z_current,
             'T_z': float(T_z_list[i]),
             'r2p': float(r2p_list[i]),
             'delta_T_stored': float(T_ij_list[i]),
             'tnfw_batch': tnfw_batch,
+            'pdpl_batch': pdpl_batch,
+            'pm_batch': pm_batch,
             'other_k': other_k,
         })
         i = j
@@ -152,6 +248,20 @@ def _fast_ray_shoot(mpb, groups, kwargs_lens_fixed, x, y, alpha_x, alpha_y, z_st
             b = group['tnfw_batch']
             ax, ay = _batch_tnfw_alpha(theta_x, theta_y,
                                        b['Rs'], b['rho0'], b['r_trunc'], b['cx'], b['cy'])
+            alpha_x = alpha_x - ax * r2p
+            alpha_y = alpha_y - ay * r2p
+
+        if group['pdpl_batch'] is not None:
+            b = group['pdpl_batch']
+            ax, ay = _batch_pdpl_alpha(theta_x, theta_y,
+                                       b['Rs'], b['rho0'], b['gamma_inner'], b['gamma_outer'],
+                                       b['cx'], b['cy'])
+            alpha_x = alpha_x - ax * r2p
+            alpha_y = alpha_y - ay * r2p
+
+        if group['pm_batch'] is not None:
+            b = group['pm_batch']
+            ax, ay = _batch_pm_alpha(theta_x, theta_y, b['theta_E'], b['cx'], b['cy'])
             alpha_x = alpha_x - ax * r2p
             alpha_y = alpha_y - ay * r2p
 
