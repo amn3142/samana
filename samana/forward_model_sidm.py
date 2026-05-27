@@ -492,6 +492,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                            hessian_eigenvalue_list=None,
                            downselect_halo_mass=None,
                             log_mhigh_mass_sheets=10.7,
+                           checkpoint_path=None,
                            ):
     """
 
@@ -904,6 +905,29 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         source_model_quasar, kwargs_source = setup_gaussian_source(source_dict['source_size_pc'],
                                                                    np.mean(source_x), np.mean(source_y),
                                                                    astropy_cosmo, data_class.z_source)
+        if checkpoint_path is not None:
+            import pickle
+            checkpoint = {
+                'source_dict': source_dict,
+                'rescale_grid_resolution': rescale_grid_resolution,
+                'rescale_grid_size': rescale_grid_size,
+                'kwargs_source': kwargs_source,
+                'kwargs_lens_init': kwargs_lens_init,
+                'kwargs_solution': kwargs_solution,
+                'magnification_method': magnification_method,
+                'rotation_angle_list': rotation_angle_list,
+                'hessian_eigenvalue_list': hessian_eigenvalue_list,
+                'x_image': data_class.x_image,
+                'y_image': data_class.y_image,
+                'z_source': data_class.z_source,
+                'lens_model_list': lens_model_init.lens_model_list,
+                'lens_redshift_list': lens_model_init.redshift_list,
+                'astropy_cosmo': astropy_cosmo,
+                'index_lens_split': index_lens_split,
+            }
+            with open(checkpoint_path, 'wb') as f:
+                pickle.dump(checkpoint, f)
+            return [None] * 18
         grid_size_base = auto_raytracing_grid_size(source_dict['source_size_pc'])
         grid_resolution = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc'])
         if isinstance(rescale_grid_size, list) or isinstance(rescale_grid_size, np.ndarray):

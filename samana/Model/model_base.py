@@ -1,6 +1,6 @@
 from lenstronomy.LensModel.Util.decouple_multi_plane_util import *
 from lenstronomy.Util.param_util import ellipticity2phi_q
-from samana.image_magnification_util import magnification_finite_decoupled
+from samana.image_magnification_util import magnification_finite_decoupled, _build_tnfw_groups, _fast_coords_and_deflections
 from samana.forward_model_util import macromodel_readout_function_eplshear
 import numpy as np
 from lenstronomy.Util.class_creator import create_class_instances
@@ -511,6 +511,7 @@ class EPLModelBase(object):
             setup_lens_model(lens_model_init, kwargs_lens_init, index_lens_split, use_jax_bool_list)
         (lens_model_fixed, lens_model_free, kwargs_lens_fixed,
          kwargs_lens_free, z_source, z_split, cosmo_bkg) = setup_decoupled_multiplane_lens_model_output
+        groups = _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed)
         if do_decoupled_multiplane_raytracing:
             if decoupled_multiplane_grid_type == 'GRID':
                 deltaPix, _, _, _, window_size = self._data.coordinate_properties
@@ -521,9 +522,9 @@ class EPLModelBase(object):
                 interp_points = (0.0, 0.0)
             else:
                 raise ValueError('Unknown decoupled_multiplane_grid_type '+str(decoupled_multiplane_grid_type))
-            xD, yD, alpha_x_foreground, alpha_y_foreground, alpha_beta_subx, alpha_beta_suby = coordinates_and_deflections(
-                lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
-                x_grid, y_grid, z_split, z_source, cosmo_bkg)
+            xD, yD, alpha_x_foreground, alpha_y_foreground, alpha_beta_subx, alpha_beta_suby = \
+                _fast_coords_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                             x_grid, y_grid, z_split, z_source, cosmo_bkg, groups)
             kwargs_class_setup = decoupled_multiplane_class_setup(lens_model_free, xD, yD, alpha_x_foreground, \
                                              alpha_y_foreground, alpha_beta_subx, \
                                              alpha_beta_suby, z_split, \
