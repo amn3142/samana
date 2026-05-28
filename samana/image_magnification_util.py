@@ -904,7 +904,11 @@ def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens,
     :param grid_resolution: pixel size (arcsec)
     :param setup_decoupled_multiplane_lens_model_output: cached lens model setup (optional)
     :param use_vectorized_ray_shooting: use Numba batch ray shooting
-    :return: list of (beta_x, beta_y) arrays per image, each shape (N_pix,)
+    :return: (beta_grids, pixel_offsets)
+        beta_grids: list of (beta_x, beta_y) arrays per image, each shape (N_pix,)
+        pixel_offsets: list of (dx, dy) image-plane offsets from image center, shape (N_pix,) each.
+            Used for aperture masking — pixels near the image center can be selected without
+            contamination from neighboring images.
     """
     if setup_decoupled_multiplane_lens_model_output is None:
         lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free, z_source, z_split, cosmo_bkg = \
@@ -921,6 +925,7 @@ def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens,
     reduced_to_phys = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
 
     beta_grids = []
+    pixel_offsets = []
     for x_img, y_img, grid_size in zip(x_image, y_image, grid_size_list):
         grid_x, grid_y, _, _ = setup_grids(2.0 * grid_size, grid_resolution, 0.0, 0.0)
         grid_x = grid_x.ravel()
@@ -949,8 +954,9 @@ def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens,
         beta_y = yD / Ts + alpha_y * Tds / Ts
 
         beta_grids.append((beta_x, beta_y))
+        pixel_offsets.append((grid_x, grid_y))
 
-    return beta_grids
+    return beta_grids, pixel_offsets
 
 
 def magnifications_precomputed(beta_grids, grid_resolution, source_x, source_y, source_sigma):
@@ -976,6 +982,76 @@ def magnifications_precomputed(beta_grids, grid_resolution, source_x, source_y, 
         flux = np.exp(-(dx * dx + dy * dy) / (2.0 * source_sigma ** 2))
         magnifications.append(np.sum(flux) * grid_resolution ** 2 / norm)
     return np.array(magnifications)
+
+
+def source_plane_pso(beta_grids, grid_resolution, source_x_init, source_y_init, source_sigma,
+                     measured_fluxes, keep_flux_ratio_index,
+                     search_window=0.05, n_particles=20, n_iterations=50):
+    """
+    PSO over source (x, y) position to minimize the flux ratio summary statistic.
+
+    Precompute beta_grids once (via precompute_source_plane_grid), then call this to find
+    the source position that best matches the observed flux ratios. Each PSO evaluation is
+    a cheap vectorized Gaussian sum with no ray shooting.
+
+    :param beta_grids: list of (beta_x, beta_y) arrays per image, from precompute_source_plane_grid()
+    :param grid_resolution: pixel size in arcsec
+    :param source_x_init: initial source x position (arcsec) — center of search window
+    :param source_y_init: initial source y position (arcsec) — center of search window
+    :param source_sigma: Gaussian source 1-sigma radius in arcsec (fixed during PSO)
+    :param measured_fluxes: observed flux array (or magnification array), shape (N_images,)
+    :param keep_flux_ratio_index: indices into flux_ratios (= measured_fluxes[1:]/measured_fluxes[0]) to use
+    :param search_window: half-width of the source position search box in arcsec
+    :param n_particles: number of PSO particles
+    :param n_iterations: number of PSO iterations
+    :return: (magnifications, stat) at best-fit source position
+    """
+    x_lo = source_x_init - search_window
+    x_hi = source_x_init + search_window
+    y_lo = source_y_init - search_window
+    y_hi = source_y_init + search_window
+
+    fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
+    keep = list(keep_flux_ratio_index)
+    fr_data_keep = np.array([fr_data[i] for i in keep])
+    norm = np.max(fr_data_keep)
+
+    def _stat(mags):
+        fr_model_keep = np.array([mags[i + 1] / mags[0] for i in keep])
+        return np.sqrt(np.sum((fr_data_keep - fr_model_keep) ** 2)) / norm
+
+    rng = np.random.default_rng()
+    pos = np.column_stack([
+        rng.uniform(x_lo, x_hi, n_particles),
+        rng.uniform(y_lo, y_hi, n_particles),
+    ])
+    vel = np.zeros_like(pos)
+    pbest = pos.copy()
+    pbest_stat = np.full(n_particles, np.inf)
+    gbest = pos[0].copy()
+    gbest_stat = np.inf
+    gbest_mags = None
+
+    w, c1, c2 = 0.7, 1.5, 1.5
+
+    for _ in range(n_iterations + 1):
+        for i in range(n_particles):
+            mags = magnifications_precomputed(beta_grids, grid_resolution,
+                                             pos[i, 0], pos[i, 1], source_sigma)
+            s = _stat(mags)
+            if s < pbest_stat[i]:
+                pbest_stat[i] = s
+                pbest[i] = pos[i].copy()
+            if s < gbest_stat:
+                gbest_stat = s
+                gbest = pos[i].copy()
+                gbest_mags = mags.copy()
+        r1 = rng.random((n_particles, 2))
+        r2 = rng.random((n_particles, 2))
+        vel = w * vel + c1 * r1 * (pbest - pos) + c2 * r2 * (gbest - pos)
+        pos = np.clip(pos + vel, [x_lo, y_lo], [x_hi, y_hi])
+
+    return gbest_mags, gbest_stat
 
 
 def setup_gaussian_source(source_fwhm_pc, source_x, source_y, astropy_cosmo, z_source):
