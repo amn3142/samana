@@ -46,7 +46,8 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                   background_shifting=True,
                   rotation_angle_list=None,
                   hessian_eigenvalue_list=None,
-                downselect_halo_mass=None
+                downselect_halo_mass=None,
+                  use_vectorized_ray_shooting=True
                   ):
     """
     Top-level function for forward modeling strong lenses with substructure. This function makes repeated calls to
@@ -252,7 +253,8 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                              background_shifting,
                              rotation_angle_list,
                              hessian_eigenvalue_list,
-                             downselect_halo_mass
+                             downselect_halo_mass,
+                             use_vectorized_ray_shooting
                              ))
 
             pool = Pool(num_threads)
@@ -335,7 +337,8 @@ def forward_model(output_path, job_index, n_keep, data_class, model, preset_mode
                                                 background_shifting,
                                                rotation_angle_list,
                                                hessian_eigenvalue_list,
-                                               downselect_halo_mass
+                                               downselect_halo_mass,
+                                               use_vectorized_ray_shooting
                                                )
 
             seed_counter += 1
@@ -493,6 +496,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                            downselect_halo_mass=None,
                             log_mhigh_mass_sheets=10.7,
                            checkpoint_path=None,
+                           use_vectorized_ray_shooting=True,
                            ):
     """
 
@@ -949,7 +953,8 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                               setup_decoupled_multiplane_lens_model_output,
                                                                               magnification_method=magnification_method,
                                                                               rotation_angle_list=rotation_angle_list,
-                                                                              hessian_eigenvalue_list=hessian_eigenvalue_list)
+                                                                              hessian_eigenvalue_list=hessian_eigenvalue_list,
+                                                                              use_vectorized_ray_shooting=use_vectorized_ray_shooting)
         flux_uncertainty = None
         stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
                                                                                magnifications,
