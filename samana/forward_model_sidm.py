@@ -7,7 +7,8 @@ from lenstronomy.Util.magnification_finite_util import auto_raytracing_grid_reso
 from lenstronomy.Workflow.fitting_sequence import FittingSequence
 from lenstronomy.Util.class_creator import create_im_sim
 from lenstronomy.LensModel.QuadOptimizer.optimizer import Optimizer
-from samana.image_magnification_util import setup_gaussian_source
+from samana.image_magnification_util import setup_gaussian_source, precompute_source_plane_grid, \
+    source_plane_pso
 from samana.param_managers import auto_param_class
 from scipy.stats import multivariate_normal
 from copy import deepcopy
@@ -928,6 +929,10 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 'lens_redshift_list': lens_model_init.redshift_list,
                 'astropy_cosmo': astropy_cosmo,
                 'index_lens_split': index_lens_split,
+                'source_x': float(np.mean(source_x)),
+                'source_y': float(np.mean(source_y)),
+                'measured_fluxes': np.array(data_class.magnifications),
+                'keep_flux_ratio_index': data_class.keep_flux_ratio_index,
             }
             with open(checkpoint_path, 'wb') as f:
                 pickle.dump(checkpoint, f)
@@ -941,26 +946,45 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 grid_size_list.append(rescale_size * grid_size_base)
         else:
             grid_size_list = [rescale_grid_size * grid_size_base] * len(data_class.x_image)
-        # we pass in setup_decoupled_multiplane_lens_model_output, the decoupled multiplane parameters
-        # computed for the proposed macromodel in setup_kwargs_model
-        magnifications, images = model_class.image_magnification_gaussian(source_model_quasar,
-                                                                              kwargs_source,
-                                                                              lens_model_init,
-                                                                              kwargs_lens_init,
-                                                                              kwargs_solution,
-                                                                              grid_size_list,
-                                                                              grid_resolution,
-                                                                              setup_decoupled_multiplane_lens_model_output,
-                                                                              magnification_method=magnification_method,
-                                                                              rotation_angle_list=rotation_angle_list,
-                                                                              hessian_eigenvalue_list=hessian_eigenvalue_list,
-                                                                              use_vectorized_ray_shooting=use_vectorized_ray_shooting)
-        flux_uncertainty = None
-        stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
-                                                                               magnifications,
-                                                                                flux_uncertainty,
-                                                                               data_class.keep_flux_ratio_index,
-                                                                               data_class.uncertainty_in_fluxes)
+
+        if magnification_method == 'SOURCE_PSO':
+            kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(data_class.z_source).value
+            source_sigma = 1e-3 * source_dict['source_size_pc'] / 2.354820 / kpc_per_arcsec
+            _, _, index_lens_split, _ = model_class.setup_lens_model()
+            beta_grids, _pixel_offsets = precompute_source_plane_grid(
+                lens_model_init, kwargs_lens_init, kwargs_solution, index_lens_split,
+                data_class.x_image, data_class.y_image, grid_size_list, grid_resolution,
+                setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
+                use_vectorized_ray_shooting=use_vectorized_ray_shooting)
+            magnifications, stat = source_plane_pso(
+                beta_grids, grid_resolution,
+                float(np.mean(source_x)), float(np.mean(source_y)), source_sigma,
+                data_class.magnifications, data_class.keep_flux_ratio_index)
+            images = None
+            flux_ratios = list(magnifications[1:] / magnifications[0])
+            flux_ratios_data = list(
+                np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
+        else:
+            # we pass in setup_decoupled_multiplane_lens_model_output, the decoupled multiplane parameters
+            # computed for the proposed macromodel in setup_kwargs_model
+            magnifications, images = model_class.image_magnification_gaussian(source_model_quasar,
+                                                                                  kwargs_source,
+                                                                                  lens_model_init,
+                                                                                  kwargs_lens_init,
+                                                                                  kwargs_solution,
+                                                                                  grid_size_list,
+                                                                                  grid_resolution,
+                                                                                  setup_decoupled_multiplane_lens_model_output,
+                                                                                  magnification_method=magnification_method,
+                                                                                  rotation_angle_list=rotation_angle_list,
+                                                                                  hessian_eigenvalue_list=hessian_eigenvalue_list,
+                                                                                  use_vectorized_ray_shooting=use_vectorized_ray_shooting)
+            flux_uncertainty = None
+            stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
+                                                                                   magnifications,
+                                                                                    flux_uncertainty,
+                                                                                   data_class.keep_flux_ratio_index,
+                                                                                   data_class.uncertainty_in_fluxes)
 
     tend = time()
     if verbose:
