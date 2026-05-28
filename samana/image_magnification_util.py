@@ -883,6 +883,101 @@ def _inds_compute_grid(grid_r, r_min, r_max, inds_compute):
     inds_computed = np.append(inds_compute, inds_compute_new).astype(int)
     return inds_compute_new, inds_outside_r, inds_computed
 
+def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens, index_lens_split,
+                                 x_image, y_image, grid_size_list, grid_resolution,
+                                 setup_decoupled_multiplane_lens_model_output=None,
+                                 use_vectorized_ray_shooting=True):
+    """
+    Pre-compute source-plane coordinates for a fixed (halo realization + macromodel).
+
+    Shoots all rays on a grid of 2x the maximum aperture size around each image at once,
+    storing (beta_x, beta_y) per pixel. Subsequent magnification evaluations for different
+    source positions/sizes are then cheap vectorized operations with no further ray shooting.
+
+    :param lens_model_init: lens model instance
+    :param kwargs_lens_init: lens model kwargs
+    :param kwargs_lens: macromodel kwargs (fixed)
+    :param index_lens_split: index splitting fixed/free lens components
+    :param x_image: image x-coordinates (arcsec)
+    :param y_image: image y-coordinates (arcsec)
+    :param grid_size_list: list of max aperture radii per image (arcsec)
+    :param grid_resolution: pixel size (arcsec)
+    :param setup_decoupled_multiplane_lens_model_output: cached lens model setup (optional)
+    :param use_vectorized_ray_shooting: use Numba batch ray shooting
+    :return: list of (beta_x, beta_y) arrays per image, each shape (N_pix,)
+    """
+    if setup_decoupled_multiplane_lens_model_output is None:
+        lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free, z_source, z_split, cosmo_bkg = \
+            setup_lens_model(lens_model_init, kwargs_lens_init, index_lens_split)
+    else:
+        (lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+         kwargs_lens_free, z_source, z_split, cosmo_bkg) = setup_decoupled_multiplane_lens_model_output
+
+    groups = _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed) if use_vectorized_ray_shooting else None
+
+    Td = cosmo_bkg.T_xy(0, z_split)
+    Ts = cosmo_bkg.T_xy(0, z_source)
+    Tds = cosmo_bkg.T_xy(z_split, z_source)
+    reduced_to_phys = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
+
+    beta_grids = []
+    for x_img, y_img, grid_size in zip(x_image, y_image, grid_size_list):
+        grid_x, grid_y, _, _ = setup_grids(2.0 * grid_size, grid_resolution, 0.0, 0.0)
+        grid_x = grid_x.ravel()
+        grid_y = grid_y.ravel()
+
+        x_points = grid_x + x_img
+        y_points = grid_y + y_img
+
+        if groups is not None:
+            xD, yD, ax_fg, ay_fg, ax_bg, ay_bg = _fast_coords_and_deflections(
+                lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                x_points, y_points, z_split, z_source, cosmo_bkg, groups)
+        else:
+            xD, yD, ax_fg, ay_fg, ax_bg, ay_bg = coordinates_and_deflections(
+                lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                x_points, y_points, z_split, z_source, cosmo_bkg)
+
+        defl_x, defl_y = lens_model_free.alpha(xD / Td, yD / Td, kwargs_lens)
+        defl_x *= reduced_to_phys
+        defl_y *= reduced_to_phys
+
+        alpha_x = ax_fg - defl_x + ax_bg
+        alpha_y = ay_fg - defl_y + ay_bg
+
+        beta_x = xD / Ts + alpha_x * Tds / Ts
+        beta_y = yD / Ts + alpha_y * Tds / Ts
+
+        beta_grids.append((beta_x, beta_y))
+
+    return beta_grids
+
+
+def magnifications_precomputed(beta_grids, grid_resolution, source_x, source_y, source_sigma):
+    """
+    Compute magnifications from precomputed source-plane coordinates.
+
+    For a fixed (halo realization + macromodel), this replaces repeated ray shooting with
+    a single Gaussian evaluation per pixel. Call precompute_source_plane_grid() once, then
+    call this function for each (source_x, source_y, source_sigma) combination.
+
+    :param beta_grids: list of (beta_x, beta_y) arrays per image from precompute_source_plane_grid()
+    :param grid_resolution: pixel size in arcsec
+    :param source_x: source x position (arcsec)
+    :param source_y: source y position (arcsec)
+    :param source_sigma: Gaussian source size, 1-sigma radius (arcsec)
+    :return: array of magnifications, one per image
+    """
+    magnifications = []
+    norm = 2.0 * np.pi * source_sigma ** 2
+    for beta_x, beta_y in beta_grids:
+        dx = beta_x - source_x
+        dy = beta_y - source_y
+        flux = np.exp(-(dx * dx + dy * dy) / (2.0 * source_sigma ** 2))
+        magnifications.append(np.sum(flux) * grid_resolution ** 2 / norm)
+    return np.array(magnifications)
+
+
 def setup_gaussian_source(source_fwhm_pc, source_x, source_y, astropy_cosmo, z_source):
 
     if astropy_cosmo is None:
