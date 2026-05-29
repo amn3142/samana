@@ -883,6 +883,56 @@ def _inds_compute_grid(grid_r, r_min, r_max, inds_compute):
     inds_computed = np.append(inds_compute, inds_compute_new).astype(int)
     return inds_compute_new, inds_outside_r, inds_computed
 
+def estimate_pso_grid_size(lens_model, kwargs_lens, x_image, y_image,
+                           source_fwhm_pc, max_offset_pc, z_source, astropy_cosmo,
+                           n_sigma_coverage=3, grid_multiplier=2.0):
+    """
+    Estimate the image-plane grid half-width required for source-plane PSO.
+
+    Uses the local Jacobian A = I - d(alpha)/d(theta) at each image position to map the
+    required source-plane coverage (max offset + n*sigma of source size) back to an
+    image-plane grid radius. Fast: one hessian evaluation per image, no ray tracing.
+
+    :param lens_model: lenstronomy LensModel instance (full model incl. halos)
+    :param kwargs_lens: lens kwargs evaluated at the image positions (halos + fitted macromodel)
+    :param x_image: image x-coordinates (arcsec)
+    :param y_image: image y-coordinates (arcsec)
+    :param source_fwhm_pc: source FWHM in parsec — sets source sigma = FWHM / 2.354820
+    :param max_offset_pc: maximum source position offset to cover, in parsec
+    :param z_source: source redshift
+    :param astropy_cosmo: astropy cosmology instance
+    :param n_sigma_coverage: number of source sigmas to capture beyond the max offset (default 3)
+    :param grid_multiplier: factor by which the precomputed grid exceeds the base grid_size
+        (default 2.0, matching precompute_source_plane_grid which uses 2x the aperture)
+    :return: (grid_size_per_image, rescale_factor)
+        grid_size_per_image: array of required grid half-widths per image (arcsec)
+        rescale_factor: scalar — multiply auto_raytracing_grid_size(source_fwhm_pc) by this
+            to cover all images; pass as rescale_grid_size to the forward model
+    """
+    from lenstronomy.Util.magnification_finite_util import auto_raytracing_grid_size
+
+    kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(z_source).value
+    source_sigma   = 1e-3 * source_fwhm_pc / 2.354820 / kpc_per_arcsec  # arcsec
+    max_offset     = 1e-3 * max_offset_pc  / kpc_per_arcsec              # arcsec
+    r_source_total = max_offset + n_sigma_coverage * source_sigma
+
+    grid_size_auto = auto_raytracing_grid_size(source_fwhm_pc)
+
+    grid_sizes = []
+    for xi, yi in zip(x_image, y_image):
+        f_xx, f_xy, f_yx, f_yy = lens_model.hessian(xi, yi, kwargs_lens)
+        A = np.array([[1.0 - f_xx, -f_xy],
+                      [-f_yx,       1.0 - f_yy]])
+        lam_min = np.min(np.abs(np.linalg.eigvalsh(A)))
+        # image-plane radius needed so the grid (after the multiplier) covers r_source_total
+        required = r_source_total / lam_min / grid_multiplier
+        grid_sizes.append(required)
+
+    grid_sizes = np.array(grid_sizes)
+    rescale_factor = np.max(grid_sizes) / grid_size_auto
+    return grid_sizes, rescale_factor
+
+
 def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens, index_lens_split,
                                  x_image, y_image, grid_size_list, grid_resolution,
                                  setup_decoupled_multiplane_lens_model_output=None,
