@@ -8,7 +8,7 @@ from lenstronomy.Workflow.fitting_sequence import FittingSequence
 from lenstronomy.Util.class_creator import create_im_sim
 from lenstronomy.LensModel.QuadOptimizer.optimizer import Optimizer
 from samana.image_magnification_util import setup_gaussian_source, precompute_source_plane_grid, \
-    source_plane_pso
+    source_plane_pso, source_optimizer_pso
 from samana.param_managers import auto_param_class
 from scipy.stats import multivariate_normal
 from copy import deepcopy
@@ -964,6 +964,27 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 beta_grids, grid_resolution,
                 float(np.mean(source_x)), float(np.mean(source_y)), source_sigma,
                 data_class.magnifications, data_class.keep_flux_ratio_index)
+            images = None
+            flux_ratios = list(magnifications[1:] / magnifications[0])
+            flux_ratios_data = list(
+                np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
+        elif magnification_method == 'SOURCE_OPTIMIZER':
+            magnifications, stat = source_optimizer_pso(
+                lens_model_init, kwargs_lens_init, kwargs_solution, index_lens_split,
+                data_class.x_image, data_class.y_image,
+                float(np.mean(source_x)), float(np.mean(source_y)),
+                kwargs_sample_source['source_size_pc'],
+                data_class.magnifications, data_class.keep_flux_ratio_index,
+                data_class.z_source, astropy_cosmo,
+                magnification_method='ELLIPTICAL_APERTURE',
+                rotation_angle_list=rotation_angle_list,
+                hessian_eigenvalue_list=hessian_eigenvalue_list,
+                rescale_grid_size=rescale_grid_size,
+                rescale_grid_resolution=rescale_grid_resolution,
+                flux_ratio_uncertainty=0.05,
+                setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
+                use_vectorized_ray_shooting=use_vectorized_ray_shooting,
+            )
             images = None
             flux_ratios = list(magnifications[1:] / magnifications[0])
             flux_ratios_data = list(
