@@ -505,7 +505,7 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
                                                          lens_model_free, kwargs_lens_fixed, kwargs_lens_free, kwargs_lens,
                                                          z_split, z_source, cosmo_bkg, x_img, y_img, grid_resolution,
                                                          grid_size_list[j],
-                                                         z_split, z_source)
+                                                         z_split, z_source, groups=groups)
             magnifications.append(mag)
             flux_arrays.append(flux_array.T)
 
@@ -536,7 +536,7 @@ def mag_finite_single_image_adaptive(source_model, kwargs_source, lens_model_fix
                             kwargs_lens_free, kwargs_lens, z_split, z_source,
                             cosmo_bkg, x_image, y_image, grid_resolution, grid_size_max,
                                zlens, zsource, intial_resolution_reduction_factor=4,flux_threshold_factor=200,
-                               distance_factor=30):
+                               distance_factor=30, groups=None):
     """
 
     :param source_model:
@@ -586,9 +586,14 @@ def mag_finite_single_image_adaptive(source_model, kwargs_source, lens_model_fix
     grid_y_large_init = grid_y_large_init[inds_compute]
     x_points_temp = grid_x_large_init + x_image
     y_points_temp = grid_y_large_init + y_image
-    _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
-        coordinates_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
-                                    x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg)
+    if groups is not None:
+        _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
+            _fast_coords_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                        x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg, groups)
+    else:
+        _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
+            coordinates_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                        x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg)
     xD[inds_compute] = _xD
     yD[inds_compute] = _yD
     alpha_x_foreground[inds_compute] = _alpha_x_foreground
@@ -659,9 +664,14 @@ def mag_finite_single_image_adaptive(source_model, kwargs_source, lens_model_fix
     alpha_y_foreground = np.zeros_like(grid_y_large)
     alpha_x_background = np.zeros_like(grid_x_large)
     alpha_y_background = np.zeros_like(grid_y_large)
-    _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
-        coordinates_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
-                                    x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg)
+    if groups is not None:
+        _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
+            _fast_coords_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                        x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg, groups)
+    else:
+        _xD, _yD, _alpha_x_foreground, _alpha_y_foreground, _alpha_x_background, _alpha_y_background = \
+            coordinates_and_deflections(lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+                                        x_points_temp, y_points_temp, z_split, z_source, cosmo_bkg)
     xD[inds_compute_highres] = _xD
     yD[inds_compute_highres] = _yD
     alpha_x_foreground[inds_compute_highres] = _alpha_x_foreground
@@ -883,18 +893,36 @@ def _inds_compute_grid(grid_r, r_min, r_max, inds_compute):
     inds_computed = np.append(inds_compute, inds_compute_new).astype(int)
     return inds_compute_new, inds_outside_r, inds_computed
 
+def min_source_size_from_prior(source_size_prior):
+    """Return the minimum source size (pc) implied by a prior specification.
+
+    Used to set the precomputed grid resolution fine enough for all possible draws.
+    Supports FIXED and UNIFORM; raises ValueError for other types.
+    """
+    if isinstance(source_size_prior, (int, float)):
+        return float(source_size_prior)
+    prior_type = source_size_prior[0]
+    if prior_type == 'FIXED':
+        return float(source_size_prior[1])
+    elif prior_type == 'UNIFORM':
+        return float(source_size_prior[1])   # lower bound
+    else:
+        raise ValueError(f"Unsupported prior type '{prior_type}' for min source size; "
+                         f"handle manually or add support.")
+
+
 def estimate_pso_grid_size(lens_model, kwargs_lens, x_image, y_image,
                            source_fwhm_pc, max_offset_pc, z_source, astropy_cosmo,
-                           n_sigma_coverage=3, grid_multiplier=2.0):
+                           n_sigma_coverage=3):
     """
-    Estimate the image-plane grid half-width required for source-plane PSO.
+    Estimate the minimum image-plane grid half-width required for source-plane PSO.
 
     Uses the local Jacobian A = I - d(alpha)/d(theta) at each image position to map the
     required source-plane coverage (max offset + n*sigma of source size) back to an
-    image-plane grid radius. Fast: one hessian evaluation per image, no ray tracing.
+    image-plane radius. Fast: one hessian evaluation per image, no ray tracing.
 
     :param lens_model: lenstronomy LensModel instance (full model incl. halos)
-    :param kwargs_lens: lens kwargs evaluated at the image positions (halos + fitted macromodel)
+    :param kwargs_lens: lens kwargs (halos + fitted macromodel)
     :param x_image: image x-coordinates (arcsec)
     :param y_image: image y-coordinates (arcsec)
     :param source_fwhm_pc: source FWHM in parsec — sets source sigma = FWHM / 2.354820
@@ -902,12 +930,13 @@ def estimate_pso_grid_size(lens_model, kwargs_lens, x_image, y_image,
     :param z_source: source redshift
     :param astropy_cosmo: astropy cosmology instance
     :param n_sigma_coverage: number of source sigmas to capture beyond the max offset (default 3)
-    :param grid_multiplier: factor by which the precomputed grid exceeds the base grid_size
-        (default 2.0, matching precompute_source_plane_grid which uses 2x the aperture)
-    :return: (grid_size_per_image, rescale_factor)
-        grid_size_per_image: array of required grid half-widths per image (arcsec)
-        rescale_factor: scalar — multiply auto_raytracing_grid_size(source_fwhm_pc) by this
-            to cover all images; pass as rescale_grid_size to the forward model
+    :return: (grid_size_per_image, rescale_factor, coverage_arcsec)
+        grid_size_per_image: array of minimum image-plane grid half-widths per image (arcsec)
+        rescale_factor: scalar — max(grid_size_per_image) / auto_raytracing_grid_size(source_fwhm_pc);
+            pass as rescale_grid_size to the forward model
+        coverage_arcsec: the source-plane coverage radius (arcsec) = max_offset + n_sigma*sigma;
+            pass directly to precompute_source_plane_grid(coverage_arcsec=...) to enable
+            elliptical image-plane masking and reduce the number of pixels to ray-trace
     """
     from lenstronomy.Util.magnification_finite_util import auto_raytracing_grid_size
 
@@ -916,27 +945,24 @@ def estimate_pso_grid_size(lens_model, kwargs_lens, x_image, y_image,
     max_offset     = 1e-3 * max_offset_pc  / kpc_per_arcsec              # arcsec
     r_source_total = max_offset + n_sigma_coverage * source_sigma
 
-    grid_size_auto = auto_raytracing_grid_size(source_fwhm_pc)
-
     grid_sizes = []
     for xi, yi in zip(x_image, y_image):
         f_xx, f_xy, f_yx, f_yy = lens_model.hessian(xi, yi, kwargs_lens)
         A = np.array([[1.0 - f_xx, -f_xy],
                       [-f_yx,       1.0 - f_yy]])
         lam_min = np.min(np.abs(np.linalg.eigvalsh(A)))
-        # image-plane radius needed so the grid (after the multiplier) covers r_source_total
-        required = r_source_total / lam_min / grid_multiplier
-        grid_sizes.append(required)
+        grid_sizes.append(r_source_total / lam_min)
 
     grid_sizes = np.array(grid_sizes)
-    rescale_factor = np.max(grid_sizes) / grid_size_auto
-    return grid_sizes, rescale_factor
+    rescale_factor = np.max(grid_sizes) / auto_raytracing_grid_size(source_fwhm_pc)
+    return grid_sizes, rescale_factor, r_source_total
 
 
 def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens, index_lens_split,
                                  x_image, y_image, grid_size_list, grid_resolution,
                                  setup_decoupled_multiplane_lens_model_output=None,
-                                 use_vectorized_ray_shooting=True):
+                                 use_vectorized_ray_shooting=True,
+                                 coverage_arcsec=None):
     """
     Pre-compute source-plane coordinates for a fixed (halo realization + macromodel).
 
@@ -954,6 +980,14 @@ def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens,
     :param grid_resolution: pixel size (arcsec)
     :param setup_decoupled_multiplane_lens_model_output: cached lens model setup (optional)
     :param use_vectorized_ray_shooting: use Numba batch ray shooting
+    :param coverage_arcsec: if given, apply an elliptical mask in the image plane before
+        ray-tracing. Uses the local Jacobian A = I - d(alpha)/d(theta) at each image position
+        to discard pixels where |A @ [dx, dy]| > coverage_arcsec, i.e. pixels whose
+        Jacobian-approximated source-plane position lies outside the target coverage circle.
+        Should equal the total source-plane radius to cover:
+            max_source_offset + n_sigma * source_sigma + pso_search_window
+        For highly magnified images (one small eigenvalue) this removes >99% of the square
+        grid pixels, giving a proportional speedup in ray-tracing.
     :return: (beta_grids, pixel_offsets)
         beta_grids: list of (beta_x, beta_y) arrays per image, each shape (N_pix,)
         pixel_offsets: list of (dx, dy) image-plane offsets from image center, shape (N_pix,) each.
@@ -974,12 +1008,38 @@ def precompute_source_plane_grid(lens_model_init, kwargs_lens_init, kwargs_lens,
     Tds = cosmo_bkg.T_xy(z_split, z_source)
     reduced_to_phys = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
 
+    # Build full kwargs (halos + fitted macromodel) for Jacobian if elliptical masking requested
+    if coverage_arcsec is not None:
+        kwargs_full_jac = list(kwargs_lens_init)
+        for j, idx in enumerate(index_lens_split):
+            kwargs_full_jac[idx] = kwargs_lens[j]
+
+    # Allow coverage_arcsec to be a scalar or a per-image list/array
+    if coverage_arcsec is not None and not hasattr(coverage_arcsec, '__len__'):
+        coverage_arcsec = [coverage_arcsec] * len(x_image)
+
     beta_grids = []
     pixel_offsets = []
-    for x_img, y_img, grid_size in zip(x_image, y_image, grid_size_list):
+    for x_img, y_img, grid_size, cov in zip(
+            x_image, y_image, grid_size_list,
+            coverage_arcsec if coverage_arcsec is not None else [None] * len(x_image)):
         grid_x, grid_y, _, _ = setup_grids(2.0 * grid_size, grid_resolution, 0.0, 0.0)
         grid_x = grid_x.ravel()
         grid_y = grid_y.ravel()
+
+        if cov is not None:
+            # Jacobian A at image center: delta_beta ≈ A @ [dx, dy]
+            f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(x_img, y_img, kwargs_full_jac)
+            A = np.array([[1.0 - float(f_xx), -float(f_xy)],
+                          [-float(f_yx),        1.0 - float(f_yy)]])
+            dbeta_x = A[0, 0] * grid_x + A[0, 1] * grid_y
+            dbeta_y = A[1, 0] * grid_x + A[1, 1] * grid_y
+            mask = (dbeta_x ** 2 + dbeta_y ** 2) <= cov ** 2
+            frac = mask.sum() / mask.size
+            print(f'  Elliptical mask at ({x_img:.3f}, {y_img:.3f}): '
+                  f'{mask.sum():,} / {mask.size:,} pixels kept ({100*frac:.1f}%)')
+            grid_x = grid_x[mask]
+            grid_y = grid_y[mask]
 
         x_points = grid_x + x_img
         y_points = grid_y + y_img
@@ -1032,6 +1092,156 @@ def magnifications_precomputed(beta_grids, grid_resolution, source_x, source_y, 
         flux = np.exp(-(dx * dx + dy * dy) / (2.0 * source_sigma ** 2))
         magnifications.append(np.sum(flux) * grid_resolution ** 2 / norm)
     return np.array(magnifications)
+
+
+def magnifications_elliptical_mask(beta_grids, pixel_offsets, grid_resolution,
+                                   source_x, source_y, source_sigma,
+                                   n_sigma=5, return_masks=False,
+                                   pixel_areas=None):
+    """
+    Compute magnifications using a per-draw source-plane circular aperture mask.
+
+    For each image, includes only pixels whose ray-traced source-plane position lies within
+    n_sigma * source_sigma of (source_x, source_y). This is equivalent to an elliptical
+    aperture in image-plane (the Jacobian maps the source-plane circle to an image-plane
+    ellipse), but the mask is applied in source-plane using the actual ray-traced coordinates
+    rather than the Jacobian approximation.
+
+    :param beta_grids: list of (beta_x, beta_y) per image from precompute_source_plane_grid()
+    :param pixel_offsets: list of (dx, dy) per image (image-plane offsets, not used for mask
+        computation but returned alongside masks for downstream plotting)
+    :param grid_resolution: pixel size (arcsec); ignored if pixel_areas is provided
+    :param source_x: source center x (arcsec)
+    :param source_y: source center y (arcsec)
+    :param source_sigma: source 1-sigma radius (arcsec)
+    :param n_sigma: number of sigmas for the aperture; pixels beyond this are excluded
+    :param return_masks: if True, also return a list of boolean mask arrays per image
+    :param pixel_areas: optional list of per-pixel area arrays (arcsec^2), one per image.
+        Use this for multi-resolution grids where different pixels have different sizes.
+        If None, all pixels are assumed to have area grid_resolution**2.
+    :return: magnification array, shape (N_images,); if return_masks, also (masks,)
+    """
+    norm = 2.0 * np.pi * source_sigma ** 2
+    r_max_sq = (n_sigma * source_sigma) ** 2
+
+    mags = []
+    mask_list = []
+    for i, ((bx, by), _) in enumerate(zip(beta_grids, pixel_offsets)):
+        pa = pixel_areas[i] if pixel_areas is not None else np.full(len(bx), grid_resolution ** 2)
+        r2 = (bx - source_x) ** 2 + (by - source_y) ** 2
+        mask = r2 <= r_max_sq
+        if mask.any():
+            flux = np.sum(np.exp(-r2[mask] / (2.0 * source_sigma ** 2)) * pa[mask]) / norm
+        else:
+            flux = 0.0
+        mags.append(flux)
+        if return_masks:
+            mask_list.append(mask)
+
+    if return_masks:
+        return np.array(mags), mask_list
+    return np.array(mags)
+
+
+def magnifications_adaptive(beta_grids, pixel_offsets, grid_resolution,
+                            source_x, source_y, source_sigma,
+                            grid_size_list, grid_increment_factor=15.0,
+                            convergence_threshold=0.001, return_r_max=False,
+                            return_pixel_coords=False,
+                            pixel_areas=None,
+                            rotation_angle_list=None,
+                            hessian_eigenvalue_list=None):
+    """
+    Compute magnifications by iteratively expanding the image-plane aperture ring by ring,
+    stopping when the total flux converges — replicating the logic of mag_finite_single_image
+    but using a precomputed source-plane grid instead of re-doing ray tracing.
+
+    :param beta_grids: list of (beta_x, beta_y) per image from precompute_source_plane_grid()
+    :param pixel_offsets: list of (dx, dy) image-plane offsets per image
+    :param grid_resolution: pixel size (arcsec); ignored if pixel_areas is provided
+    :param source_x: source center x (arcsec)
+    :param source_y: source center y (arcsec)
+    :param source_sigma: Gaussian source 1-sigma radius (arcsec)
+    :param grid_size_list: list of image-plane grid half-widths per image (arcsec);
+        ring step = grid_size / grid_increment_factor
+    :param grid_increment_factor: number of rings across grid_size (default 15, matching original)
+    :param convergence_threshold: stop when |mag_new - mag_old| / mag_new < this
+    :param return_r_max: if True, also return the converged image-plane radius per image
+    :param pixel_areas: optional list of per-pixel area arrays (arcsec^2), one per image.
+        Use this for multi-resolution grids where different pixels have different sizes.
+        If None, all pixels are assumed to have area grid_resolution**2.
+    :param rotation_angle_list: optional list of rotation angles (radians) per image.
+        If provided together with hessian_eigenvalue_list, rings are measured in elliptical
+        coordinates matching the ELLIPTICAL_APERTURE method of magnification_finite_decoupled.
+    :param hessian_eigenvalue_list: optional list of eigenvalue ratios per image (one scalar
+        per image), used to stretch the minor axis of the elliptical aperture.
+    :return: magnification array, shape (N_images,); if return_r_max, also list of r_max values
+    """
+    norm = 2.0 * np.pi * source_sigma ** 2
+    use_elliptical = (rotation_angle_list is not None and hessian_eigenvalue_list is not None)
+
+    mags = []
+    r_max_list = []
+    coords_list = []
+    for i, ((bx, by), (dx, dy), grid_size) in enumerate(zip(beta_grids, pixel_offsets, grid_size_list)):
+        pa = pixel_areas[i] if pixel_areas is not None else np.full(len(bx), grid_resolution ** 2)
+
+        r2_source = (bx - source_x) ** 2 + (by - source_y) ** 2
+
+        # Centre rings on the pixel nearest to the source in source-plane.
+        # For an offset source this is the image of that source, not the
+        # nominal image position, so rings expand from where the flux is.
+        center_idx = np.argmin(r2_source)
+        dx_off = dx - dx[center_idx]
+        dy_off = dy - dy[center_idx]
+        if use_elliptical:
+            dx_rot, dy_rot = util.rotate(dx_off, dy_off, rotation_angle_list[i])
+            r_img = np.hypot(dx_rot, dy_rot / hessian_eigenvalue_list[i])
+        else:
+            r_img = np.hypot(dx_off, dy_off)
+
+        r_step = grid_size / grid_increment_factor
+        r_max_grid = min(np.max(r_img), grid_size)
+        gauss = np.exp(-r2_source / (2.0 * source_sigma ** 2))
+        # Pre-multiply Gaussian by pixel area so the ring sum is just np.sum(weighted[in_aperture])
+        weighted = gauss * pa
+
+        cumulative = np.zeros(len(bx))
+        r_min = 0.0
+        r_max = r_step
+        mag_last = 0.0
+
+        while True:
+            in_ring = (r_img >= r_min) & (r_img < r_max)
+            cumulative[in_ring] = weighted[in_ring]
+            cumulative[r_img >= r_max] = 0.0
+
+            mag_temp = np.sum(cumulative) / norm
+
+            if mag_temp > 0:
+                if abs(mag_temp - mag_last) / mag_temp < convergence_threshold:
+                    break
+
+            r_min = r_max
+            r_max += r_step
+            if r_max > r_max_grid:
+                break
+            mag_last = mag_temp
+
+        mags.append(mag_temp)
+        r_max_list.append(r_max)
+        if return_pixel_coords:
+            sel = r_img < r_max
+            coords_list.append((dx[sel], dy[sel]))
+
+    result = (np.array(mags),)
+    if return_r_max:
+        result += (r_max_list,)
+    if return_pixel_coords:
+        result += (coords_list,)
+    if len(result) == 1:
+        return result[0]
+    return result
 
 
 def source_plane_pso(beta_grids, grid_resolution, source_x_init, source_y_init, source_sigma,
