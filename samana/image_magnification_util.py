@@ -462,7 +462,8 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
                                    magnification_method='CIRCULAR_APERTURE',
                                    rotation_angle_list=None,
                                    hessian_eigenvalue_list=None,
-                                   use_vectorized_ray_shooting=True):
+                                   use_vectorized_ray_shooting=True,
+                                   groups=None):
     """
 
     :param source_model:
@@ -488,7 +489,8 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
     else:
         (lens_model_fixed, lens_model_free, kwargs_lens_fixed,
          kwargs_lens_free, z_source, z_split, cosmo_bkg) = setup_decoupled_multiplane_lens_model_output
-    groups = _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed) if use_vectorized_ray_shooting else None
+    if groups is None and use_vectorized_ray_shooting:
+        groups = _build_tnfw_groups(lens_model_fixed, kwargs_lens_fixed)
     magnifications = []
     flux_arrays = []
 
