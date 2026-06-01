@@ -1328,7 +1328,7 @@ def source_optimizer_pso(
         hessian_eigenvalue_list=None,
         rescale_grid_size=1.0,
         rescale_grid_resolution=2.0,
-        flux_ratio_uncertainty=0.05,
+        flux_ratio_uncertainty=None,
         n_particles=20, n_iterations=10,
         setup_decoupled_multiplane_lens_model_output=None,
         use_vectorized_ray_shooting=True,
@@ -1364,7 +1364,7 @@ def source_optimizer_pso(
     :param hessian_eigenvalue_list: per-image eigenvalue ratios (if None, uses macromodel Hessian)
     :param rescale_grid_size: grid size multiplier
     :param rescale_grid_resolution: grid resolution multiplier
-    :param flux_ratio_uncertainty: fractional uncertainty on each flux ratio for chi-squared
+    :param flux_ratio_uncertainty: array of fractional uncertainties per flux ratio (length N_images-1)
     :param n_particles: PSO particle count
     :param n_iterations: PSO iteration count
     :param setup_decoupled_multiplane_lens_model_output: precomputed lens model split (optional)
@@ -1430,11 +1430,7 @@ def source_optimizer_pso(
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
     keep    = list(keep_flux_ratio_index)
     fr_data_keep = np.array([fr_data[i] for i in keep])
-    # flux_ratio_uncertainty may be a scalar or a per-flux-ratio array
-    if np.ndim(flux_ratio_uncertainty) == 0:
-        frac_unc = np.full(len(keep), float(flux_ratio_uncertainty))
-    else:
-        frac_unc = np.array([flux_ratio_uncertainty[i] for i in keep])
+    frac_unc = np.array([flux_ratio_uncertainty[i] for i in keep])
     sigma_fr = frac_unc * fr_data_keep
 
     def _compute_mags(src_x, src_y, fwhm_pc):
