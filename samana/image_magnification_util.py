@@ -1316,6 +1316,208 @@ def source_plane_pso(beta_grids, grid_resolution, source_x_init, source_y_init, 
     return gbest_mags, gbest_stat
 
 
+def source_optimizer_pso(
+        lens_model_init, kwargs_lens_init, kwargs_lens, index_lens_split,
+        x_image, y_image,
+        source_x_init, source_y_init,
+        source_size_pc_prior,
+        measured_fluxes, keep_flux_ratio_index,
+        z_source, astropy_cosmo,
+        magnification_method='ELLIPTICAL_APERTURE',
+        rotation_angle_list=None,
+        hessian_eigenvalue_list=None,
+        rescale_grid_size=1.0,
+        rescale_grid_resolution=2.0,
+        flux_ratio_uncertainty=0.05,
+        n_particles=20, n_iterations=10,
+        setup_decoupled_multiplane_lens_model_output=None,
+        use_vectorized_ray_shooting=True,
+        groups=None):
+    """
+    PSO over source (x, y, FWHM) using magnification_finite_decoupled directly.
+
+    For each proposed source position and size:
+      - Grid size and resolution are set from the proposed FWHM
+      - Image positions are predicted via A_j^{-1} @ delta_beta (linearised lens equation)
+      - Prior: offset from lens-equation solution must not exceed proposed FWHM
+      - Likelihood: chi-squared with fractional uncertainty flux_ratio_uncertainty per ratio
+
+    FWHM search range is read from source_size_pc_prior:
+      ['FIXED', val]      -> optimize only (x, y), FWHM fixed at val
+      ['UNIFORM', lo, hi] -> optimize (x, y, FWHM) with FWHM in [lo, hi]
+
+    :param lens_model_init: lenstronomy LensModel (full, including halos)
+    :param kwargs_lens_init: kwargs for lens_model_init
+    :param kwargs_lens: fitted macromodel kwargs
+    :param index_lens_split: indices of macromodel components in kwargs_lens_init
+    :param x_image: nominal image x-positions (arcsec)
+    :param y_image: nominal image y-positions (arcsec)
+    :param source_x_init: lens-equation source x (arcsec)
+    :param source_y_init: lens-equation source y (arcsec)
+    :param source_size_pc_prior: prior spec, e.g. ['FIXED', 30] or ['UNIFORM', 10, 70]
+    :param measured_fluxes: observed flux array, shape (N_images,)
+    :param keep_flux_ratio_index: indices of flux ratios to use in chi-squared
+    :param z_source: source redshift
+    :param astropy_cosmo: astropy cosmology instance
+    :param magnification_method: passed to magnification_finite_decoupled
+    :param rotation_angle_list: per-image ellipse rotation angles (if None, uses macromodel Hessian)
+    :param hessian_eigenvalue_list: per-image eigenvalue ratios (if None, uses macromodel Hessian)
+    :param rescale_grid_size: grid size multiplier
+    :param rescale_grid_resolution: grid resolution multiplier
+    :param flux_ratio_uncertainty: fractional uncertainty on each flux ratio for chi-squared
+    :param n_particles: PSO particle count
+    :param n_iterations: PSO iteration count
+    :param setup_decoupled_multiplane_lens_model_output: precomputed lens model split (optional)
+    :param use_vectorized_ray_shooting: use Numba-batched TNFW deflections
+    :param groups: precomputed TNFW groups (optional)
+    :return: (magnifications, stat) at best-fit source position
+    """
+    from lenstronomy.LensModel.Util.decouple_multi_plane_util import setup_lens_model as _setup_lens_model
+    from lenstronomy.Util.magnification_finite_util import (
+        auto_raytracing_grid_size, auto_raytracing_grid_resolution)
+
+    kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(z_source).value
+    N_images = len(x_image)
+
+    # FWHM search range from prior
+    prior_type = source_size_pc_prior[0] if hasattr(source_size_pc_prior, '__getitem__') else 'FIXED'
+    if prior_type == 'FIXED':
+        fwhm_lo = fwhm_hi = float(source_size_pc_prior[1])
+        fit_fwhm = False
+    elif prior_type == 'UNIFORM':
+        fwhm_lo, fwhm_hi = float(source_size_pc_prior[1]), float(source_size_pc_prior[2])
+        fit_fwhm = True
+    else:
+        raise ValueError(f"source_optimizer_pso: unsupported prior type '{prior_type}'")
+
+    fwhm_max_arcsec = 1e-3 * fwhm_hi / kpc_per_arcsec
+    search_window   = fwhm_max_arcsec
+
+    # Precompute lens model split if not provided
+    if setup_decoupled_multiplane_lens_model_output is None:
+        setup_decoupled_multiplane_lens_model_output = _setup_lens_model(
+            lens_model_init, kwargs_lens_init, index_lens_split)
+
+    if groups is None and use_vectorized_ray_shooting:
+        lmf, _, kwf, _, _, _, _ = setup_decoupled_multiplane_lens_model_output
+        groups = _build_tnfw_groups(lmf, kwf)
+
+    # Full kwargs for Hessian
+    kwargs_full = list(kwargs_lens_init)
+    for j, idx in enumerate(index_lens_split):
+        kwargs_full[idx] = kwargs_lens[j]
+
+    # Compute full-model Hessian at each image: A_inv for image-position prediction,
+    # and rotation/eigenvalue for elliptical aperture (overrides checkpoint values if provided)
+    A_inv_list = []
+    rot_list   = []
+    eig_list   = []
+    for xi, yi in zip(x_image, y_image):
+        f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(xi, yi, kwargs_full)
+        A = np.array([[1.0 - float(f_xx), -float(f_xy)],
+                      [-float(f_yx),        1.0 - float(f_yy)]])
+        vals, vecs = np.linalg.eigh(A)
+        lam_min, lam_max = vals[0], vals[1]
+        v_min = vecs[:, 0]
+        A_inv_list.append(np.linalg.inv(A))
+        rot_list.append(np.arctan2(v_min[1], v_min[0]))
+        eig_list.append(abs(lam_min) / abs(lam_max))
+
+    rot_arr = np.array(rot_list)
+    eig_arr = np.array(eig_list)
+
+    # Flux ratio data and uncertainty
+    fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
+    keep    = list(keep_flux_ratio_index)
+    fr_data_keep = np.array([fr_data[i] for i in keep])
+    sigma_fr     = flux_ratio_uncertainty * fr_data_keep
+
+    def _compute_mags(src_x, src_y, fwhm_pc):
+        gs_base = auto_raytracing_grid_size(fwhm_pc)
+        if isinstance(rescale_grid_size, (list, np.ndarray)):
+            grid_size_list = [r * gs_base for r in rescale_grid_size]
+        else:
+            grid_size_list = [rescale_grid_size * gs_base] * N_images
+        grid_res = rescale_grid_resolution * auto_raytracing_grid_resolution(fwhm_pc)
+
+        d_beta = np.array([src_x - source_x_init, src_y - source_y_init])
+        shifts = [A_inv_list[j] @ d_beta for j in range(N_images)]
+        x_pred = np.array([x_image[j] + shifts[j][0] for j in range(N_images)])
+        y_pred = np.array([y_image[j] + shifts[j][1] for j in range(N_images)])
+
+        src_model, kwargs_src = setup_gaussian_source(fwhm_pc, src_x, src_y, astropy_cosmo, z_source)
+        mags, _ = magnification_finite_decoupled(
+            src_model, kwargs_src,
+            x_pred, y_pred,
+            lens_model_init, kwargs_lens_init, kwargs_lens, index_lens_split,
+            grid_size_list, grid_res,
+            magnification_method=magnification_method,
+            rotation_angle_list=rot_arr,
+            hessian_eigenvalue_list=eig_arr,
+            use_vectorized_ray_shooting=use_vectorized_ray_shooting,
+            setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
+            groups=groups,
+        )
+        return mags
+
+    def _eval(src_x, src_y, fwhm_pc):
+        offset = np.sqrt((src_x - source_x_init)**2 + (src_y - source_y_init)**2)
+        if offset > 1e-3 * fwhm_pc / kpc_per_arcsec:
+            return None, np.inf
+        mags = _compute_mags(src_x, src_y, fwhm_pc)
+        fr_model_keep = np.array([mags[i + 1] / mags[0] for i in keep])
+        chi2 = np.sum(((fr_model_keep - fr_data_keep) / sigma_fr) ** 2)
+        return mags, chi2
+
+    # PSO initialisation
+    rng = np.random.default_rng()
+    x_lo, x_hi = source_x_init - search_window, source_x_init + search_window
+    y_lo, y_hi = source_y_init - search_window, source_y_init + search_window
+
+    if fit_fwhm:
+        pos = np.column_stack([rng.uniform(x_lo, x_hi, n_particles),
+                                rng.uniform(y_lo, y_hi, n_particles),
+                                rng.uniform(fwhm_lo, fwhm_hi, n_particles)])
+        lo_bounds = [x_lo, y_lo, fwhm_lo]
+        hi_bounds = [x_hi, y_hi, fwhm_hi]
+    else:
+        pos = np.column_stack([rng.uniform(x_lo, x_hi, n_particles),
+                                rng.uniform(y_lo, y_hi, n_particles)])
+        lo_bounds = [x_lo, y_lo]
+        hi_bounds = [x_hi, y_hi]
+
+    vel        = np.zeros_like(pos)
+    pbest      = pos.copy()
+    pbest_chi2 = np.full(n_particles, np.inf)
+    gbest      = pos[0].copy()
+    gbest_chi2 = np.inf
+    gbest_mags = None
+    w, c1, c2  = 0.7, 1.5, 1.5
+
+    for _ in range(n_iterations):
+        for p in range(n_particles):
+            fwhm_p = float(pos[p, 2]) if fit_fwhm else fwhm_lo
+            mags, chi2 = _eval(pos[p, 0], pos[p, 1], fwhm_p)
+            if chi2 < pbest_chi2[p]:
+                pbest_chi2[p] = chi2
+                pbest[p] = pos[p].copy()
+            if chi2 < gbest_chi2:
+                gbest_chi2 = chi2
+                gbest      = pos[p].copy()
+                gbest_mags = mags
+        r1  = rng.random(pos.shape)
+        r2  = rng.random(pos.shape)
+        vel = w * vel + c1 * r1 * (pbest - pos) + c2 * r2 * (gbest - pos)
+        pos = np.clip(pos + vel, lo_bounds, hi_bounds)
+
+    # Compute summary stat at best position using flux_ratio_summary_statistic convention
+    fr_best = gbest_mags[1:] / gbest_mags[0] if gbest_mags is not None else fr_data
+    fr_best_keep = np.array([fr_best[i] for i in keep])
+    stat = float(np.sqrt(np.sum(((fr_best_keep - fr_data_keep) / fr_data_keep) ** 2)) / len(keep))
+
+    return gbest_mags, stat
+
+
 def setup_gaussian_source(source_fwhm_pc, source_x, source_y, astropy_cosmo, z_source):
 
     if astropy_cosmo is None:
