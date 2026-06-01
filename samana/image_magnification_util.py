@@ -1343,10 +1343,9 @@ def source_optimizer_pso(
       - Likelihood: chi-squared with fractional uncertainty flux_ratio_uncertainty per ratio
 
     FWHM search range is read from source_size_pc_prior:
-      ['FIXED', val]                    -> optimize only (x, y), FWHM fixed at val
-      ['UNIFORM', lo, hi]               -> optimize (x, y, FWHM) with FWHM in [lo, hi]
-      ['GAUSSIAN', mean, sigma]         -> FWHM in [mean-4sigma, mean+4sigma]
-      ['TRUNC-HALF-GAUSS', mode, s, lo, hi] -> FWHM in [lo, hi]
+      ['UNIFORM', lo, hi] -> optimize (x, y, FWHM) with FWHM in [lo, hi]
+      ['FIXED', val]      -> optimize only (x, y), FWHM fixed at val
+    Other prior types raise ValueError.
 
     :param lens_model_init: lenstronomy LensModel (full, including halos)
     :param kwargs_lens_init: kwargs for lens_model_init
@@ -1383,22 +1382,14 @@ def source_optimizer_pso(
 
     # FWHM search range from prior
     prior_type = source_size_pc_prior[0] if hasattr(source_size_pc_prior, '__getitem__') else 'FIXED'
-    if prior_type == 'FIXED':
-        fwhm_lo = fwhm_hi = float(source_size_pc_prior[1])
-        fit_fwhm = False
-    elif prior_type == 'UNIFORM':
+    if prior_type == 'UNIFORM':
         fwhm_lo, fwhm_hi = float(source_size_pc_prior[1]), float(source_size_pc_prior[2])
         fit_fwhm = True
-    elif prior_type == 'GAUSSIAN':
-        mean, sigma = float(source_size_pc_prior[1]), float(source_size_pc_prior[2])
-        fwhm_lo = max(mean - 4.0 * sigma, 0.1)
-        fwhm_hi = mean + 4.0 * sigma
-        fit_fwhm = True
-    elif prior_type == 'TRUNC-HALF-GAUSS':
-        fwhm_lo, fwhm_hi = float(source_size_pc_prior[2]), float(source_size_pc_prior[3])
-        fit_fwhm = True
+    elif prior_type == 'FIXED':
+        fwhm_lo = fwhm_hi = float(source_size_pc_prior[1])
+        fit_fwhm = False
     else:
-        raise ValueError(f"source_optimizer_pso: unsupported prior type '{prior_type}'")
+        raise ValueError(f"source_optimizer_pso requires a UNIFORM or FIXED source size prior, got '{prior_type}'")
 
     fwhm_max_arcsec = 1e-3 * fwhm_hi / kpc_per_arcsec
     search_window   = fwhm_max_arcsec
