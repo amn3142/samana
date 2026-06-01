@@ -1430,7 +1430,12 @@ def source_optimizer_pso(
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
     keep    = list(keep_flux_ratio_index)
     fr_data_keep = np.array([fr_data[i] for i in keep])
-    sigma_fr     = flux_ratio_uncertainty * fr_data_keep
+    # flux_ratio_uncertainty may be a scalar or a per-flux-ratio array
+    if np.ndim(flux_ratio_uncertainty) == 0:
+        frac_unc = np.full(len(keep), float(flux_ratio_uncertainty))
+    else:
+        frac_unc = np.array([flux_ratio_uncertainty[i] for i in keep])
+    sigma_fr = frac_unc * fr_data_keep
 
     def _compute_mags(src_x, src_y, fwhm_pc):
         gs_base = auto_raytracing_grid_size(fwhm_pc)
