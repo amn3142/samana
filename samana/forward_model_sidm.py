@@ -989,6 +989,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
                 use_vectorized_ray_shooting=use_vectorized_ray_shooting,
                 groups=tnfw_groups,
+                verbose=verbose,
             )
             if magnifications is None:
                 return output_vector_none
