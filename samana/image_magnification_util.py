@@ -1392,7 +1392,6 @@ def source_optimizer_pso(
     else:
         raise ValueError(f"source_optimizer_pso requires a UNIFORM or FIXED source size prior, got '{prior_type}'")
 
-    # search_window updated after image-size constraint tightens fwhm_hi below
     fwhm_max_arcsec = 1e-3 * fwhm_hi / kpc_per_arcsec
 
     # Precompute lens model split if not provided
@@ -1432,12 +1431,17 @@ def source_optimizer_pso(
 
     # Prior: image-plane FWHM = source_fwhm / |λ_min| must not exceed 150 mas.
     # The most magnified image (smallest |λ_min|) sets the tightest constraint.
-    MAX_IMAGE_FWHM_ARCSEC = 0.150
+    MAX_IMAGE_FWHM_ARCSEC   = 0.150
+    MAX_IMAGE_OFFSET_ARCSEC = 0.015   # 15 mas max image-plane shift from source offset
     min_lam = min(lam_min_list)
     fwhm_hi_image_constraint_pc = MAX_IMAGE_FWHM_ARCSEC * min_lam * kpc_per_arcsec * 1e3
     fwhm_hi = min(fwhm_hi, fwhm_hi_image_constraint_pc)
     if fwhm_hi < fwhm_lo:
         return None, np.inf, None  # realization incompatible with prior + image-size constraint
+
+    # Search window: maximum source offset that gives ≤ 15 mas image-plane shift
+    # for the most magnified image (worst case: shift along major axis = offset / |λ_min|)
+    search_window = MAX_IMAGE_OFFSET_ARCSEC * min_lam
 
     # Flux ratio data and inverse covariance
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
@@ -1475,7 +1479,7 @@ def source_optimizer_pso(
         )
         return mags
 
-    MAX_IMAGE_SHIFT_ARCSEC = 0.010  # 10 mas
+    MAX_IMAGE_SHIFT_ARCSEC = MAX_IMAGE_OFFSET_ARCSEC  # 15 mas, consistent with search window
 
     def _eval(src_x, src_y, fwhm_pc):
         # Prior: source offset must not exceed proposed FWHM
@@ -1494,8 +1498,6 @@ def source_optimizer_pso(
         chi2 = float(resid @ C_inv @ resid)
         return mags, chi2
 
-    # PSO initialisation — search_window set by (possibly tightened) fwhm_hi
-    search_window = fwhm_max_arcsec
     rng = np.random.default_rng()
     x_lo, x_hi = source_x_init - search_window, source_x_init + search_window
     y_lo, y_hi = source_y_init - search_window, source_y_init + search_window
