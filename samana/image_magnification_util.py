@@ -1473,10 +1473,19 @@ def source_optimizer_pso(
         )
         return mags
 
+    MAX_IMAGE_SHIFT_ARCSEC = 0.010  # 10 mas
+
     def _eval(src_x, src_y, fwhm_pc):
+        # Prior: source offset must not exceed proposed FWHM
         offset = np.sqrt((src_x - source_x_init)**2 + (src_y - source_y_init)**2)
         if offset > 1e-3 * fwhm_pc / kpc_per_arcsec:
             return None, np.inf
+        # Prior: Jacobian-predicted image shifts must not exceed 10 mas per image
+        d_beta = np.array([src_x - source_x_init, src_y - source_y_init])
+        for A_inv in A_inv_list:
+            shift = A_inv @ d_beta
+            if np.sqrt(shift[0]**2 + shift[1]**2) > MAX_IMAGE_SHIFT_ARCSEC:
+                return None, np.inf
         mags = _compute_mags(src_x, src_y, fwhm_pc)
         fr_model_keep = np.array([mags[i + 1] / mags[0] for i in keep])
         chi2 = np.sum(((fr_model_keep - fr_data_keep) / sigma_fr) ** 2)
