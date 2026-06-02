@@ -1328,7 +1328,7 @@ def source_optimizer_pso(
         hessian_eigenvalue_list=None,
         rescale_grid_size=1.0,
         rescale_grid_resolution=2.0,
-        flux_ratio_uncertainty=None,
+        flux_ratio_covariance_matrix=None,
         n_particles=20, n_iterations=10,
         setup_decoupled_multiplane_lens_model_output=None,
         use_vectorized_ray_shooting=True,
@@ -1365,7 +1365,7 @@ def source_optimizer_pso(
     :param hessian_eigenvalue_list: per-image eigenvalue ratios (if None, uses macromodel Hessian)
     :param rescale_grid_size: grid size multiplier
     :param rescale_grid_resolution: grid resolution multiplier
-    :param flux_ratio_uncertainty: array of fractional uncertainties per flux ratio (length N_images-1)
+    :param flux_ratio_covariance_matrix: covariance matrix of flux ratios, shape (N_images-1, N_images-1)
     :param n_particles: PSO particle count
     :param n_iterations: PSO iteration count
     :param setup_decoupled_multiplane_lens_model_output: precomputed lens model split (optional)
@@ -1438,12 +1438,13 @@ def source_optimizer_pso(
     if fwhm_hi < fwhm_lo:
         return None, np.inf, None  # realization incompatible with prior + image-size constraint
 
-    # Flux ratio data and uncertainty
+    # Flux ratio data and inverse covariance
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
     keep    = list(keep_flux_ratio_index)
     fr_data_keep = np.array([fr_data[i] for i in keep])
-    frac_unc = np.array([flux_ratio_uncertainty[i] for i in keep])
-    sigma_fr = frac_unc * fr_data_keep
+    C = np.array(flux_ratio_covariance_matrix)
+    C_keep = C[np.ix_(keep, keep)]
+    C_inv  = np.linalg.inv(C_keep)
 
     def _compute_mags(src_x, src_y, fwhm_pc):
         gs_base = auto_raytracing_grid_size(fwhm_pc)
@@ -1488,7 +1489,8 @@ def source_optimizer_pso(
                 return None, np.inf
         mags = _compute_mags(src_x, src_y, fwhm_pc)
         fr_model_keep = np.array([mags[i + 1] / mags[0] for i in keep])
-        chi2 = np.sum(((fr_model_keep - fr_data_keep) / sigma_fr) ** 2)
+        resid = fr_model_keep - fr_data_keep
+        chi2 = float(resid @ C_inv @ resid)
         return mags, chi2
 
     # PSO initialisation — search_window set by (possibly tightened) fwhm_hi

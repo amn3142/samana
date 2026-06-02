@@ -981,7 +981,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 hessian_eigenvalue_list=hessian_eigenvalue_list,
                 rescale_grid_size=rescale_grid_size,
                 rescale_grid_resolution=rescale_grid_resolution,
-                flux_ratio_uncertainty=data_class.flux_uncertainty,
+                flux_ratio_covariance_matrix=data_class.flux_ratio_covariance_matrix,
                 setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
                 use_vectorized_ray_shooting=use_vectorized_ray_shooting,
             )
