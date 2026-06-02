@@ -1436,7 +1436,7 @@ def source_optimizer_pso(
     fwhm_hi_image_constraint_pc = MAX_IMAGE_FWHM_ARCSEC * min_lam * kpc_per_arcsec * 1e3
     fwhm_hi = min(fwhm_hi, fwhm_hi_image_constraint_pc)
     if fwhm_hi < fwhm_lo:
-        return None, np.inf  # realization incompatible with prior + image-size constraint
+        return None, np.inf, None  # realization incompatible with prior + image-size constraint
 
     # Flux ratio data and uncertainty
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
@@ -1538,7 +1538,16 @@ def source_optimizer_pso(
     fr_best_keep = np.array([fr_best[i] for i in keep])
     stat = float(np.sqrt(np.sum(((fr_best_keep - fr_data_keep) / fr_data_keep) ** 2)) / len(keep))
 
-    return gbest_mags, stat
+    optimizer_output = {
+        'fwhm_lo':         fwhm_lo,
+        'fwhm_hi':         fwhm_hi,
+        'max_offset_pc':   search_window * kpc_per_arcsec * 1e3,
+        'source_x_best':   float(gbest[0]),
+        'source_y_best':   float(gbest[1]),
+        'source_fwhm_best': float(gbest[2]) if fit_fwhm else fwhm_lo,
+    }
+
+    return gbest_mags, stat, optimizer_output
 
 
 def setup_gaussian_source(source_fwhm_pc, source_x, source_y, astropy_cosmo, z_source):

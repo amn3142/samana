@@ -969,7 +969,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
             flux_ratios_data = list(
                 np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
         elif magnification_method == 'SOURCE_OPTIMIZER':
-            magnifications, stat = source_optimizer_pso(
+            magnifications, stat, optimizer_output = source_optimizer_pso(
                 lens_model_init, kwargs_lens_init, kwargs_solution, index_lens_split,
                 data_class.x_image, data_class.y_image,
                 float(np.mean(source_x)), float(np.mean(source_y)),
@@ -985,8 +985,23 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
                 use_vectorized_ray_shooting=use_vectorized_ray_shooting,
             )
+            if magnifications is None:
+                return output_vector_none
             images = None
             flux_ratios = list(magnifications[1:] / magnifications[0])
+            # Append optimizer diagnostics to source samples
+            source_samples = np.append(source_samples, [
+                optimizer_output['fwhm_lo'],
+                optimizer_output['fwhm_hi'],
+                optimizer_output['max_offset_pc'],
+                optimizer_output['source_x_best'],
+                optimizer_output['source_y_best'],
+                optimizer_output['source_fwhm_best'],
+            ])
+            source_param_names += [
+                'fwhm_lo', 'fwhm_hi', 'max_offset_pc',
+                'source_x_best', 'source_y_best', 'source_fwhm_best',
+            ]
             flux_ratios_data = list(
                 np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
         else:
