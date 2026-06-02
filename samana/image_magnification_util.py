@@ -1329,11 +1329,12 @@ def source_optimizer_pso(
         rescale_grid_size=1.0,
         rescale_grid_resolution=2.0,
         flux_ratio_covariance_matrix=None,
-        n_particles=20, n_iterations=10,
+        n_particles=10, n_iterations=5,
         setup_decoupled_multiplane_lens_model_output=None,
         use_vectorized_ray_shooting=True,
         groups=None,
-        verbose=False):
+        verbose=False,
+        seed=None):
     """
     PSO over source (x, y, FWHM) using magnification_finite_decoupled directly.
 
@@ -1414,6 +1415,7 @@ def source_optimizer_pso(
     rot_list    = []
     eig_list    = []
     lam_min_list = []
+    lam_max_list = []
     for xi, yi in zip(x_image, y_image):
         f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(xi, yi, kwargs_full)
         A = np.array([[1.0 - float(f_xx), -float(f_xy)],
@@ -1425,6 +1427,7 @@ def source_optimizer_pso(
         rot_list.append(np.arctan2(v_min[1], v_min[0]))
         eig_list.append(abs(lam_min) / abs(lam_max))
         lam_min_list.append(abs(lam_min))
+        lam_max_list.append(abs(lam_max))
 
     rot_arr = np.array(rot_list)
     eig_arr = np.array(eig_list)
@@ -1435,14 +1438,26 @@ def source_optimizer_pso(
     MAX_IMAGE_OFFSET_ARCSEC = 0.015   # 15 mas max image-plane shift from source offset
     min_lam = min(lam_min_list)
     fwhm_hi_image_constraint_pc = MAX_IMAGE_FWHM_ARCSEC * min_lam * kpc_per_arcsec * 1e3
+    #print('fwhm_hi image constarint_pc')
+    #print(fwhm_hi_image_constraint_pc )
     fwhm_hi = min(fwhm_hi, fwhm_hi_image_constraint_pc)
+    
+    #print('fwhm_hi')
+    #print(fwhm_hi)
+
+
     if fwhm_hi < fwhm_lo:
-        return None, np.inf, None  # realization incompatible with prior + image-size constraint
+        return None, None, np.inf, None  # realization incompatible with prior + image-size constraint
 
-    # Search window: maximum source offset that gives ≤ 15 mas image-plane shift
-    # for the most magnified image (worst case: shift along major axis = offset / |λ_min|)
-    search_window = MAX_IMAGE_OFFSET_ARCSEC * min_lam
-
+    # Search window: geometric mean of the two allowed offsets for the most magnified image
+    # (min direction: 15 mas × λ_min; max direction: 15 mas × λ_max).
+    # Geometric mean = 15 mas × sqrt(λ_min × λ_max) = 15 mas / sqrt(μ).
+    # _eval still hard-rejects any particle whose predicted image shift exceeds 15 mas.
+    most_mag_idx = int(np.argmin(lam_min_list))
+    search_window = MAX_IMAGE_OFFSET_ARCSEC * np.sqrt(
+        lam_min_list[most_mag_idx] * lam_max_list[most_mag_idx])
+    #print('search_window')
+    #print(search_window)
     # Flux ratio data and inverse covariance
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
     keep    = list(keep_flux_ratio_index)
@@ -1482,9 +1497,11 @@ def source_optimizer_pso(
     MAX_IMAGE_SHIFT_ARCSEC = MAX_IMAGE_OFFSET_ARCSEC  # 15 mas, consistent with search window
 
     def _eval(src_x, src_y, fwhm_pc):
+        #print(src_x, src_y, fwhm_pc)
         # Prior: source offset must not exceed proposed FWHM
         offset = np.sqrt((src_x - source_x_init)**2 + (src_y - source_y_init)**2)
         if offset > 1e-3 * fwhm_pc / kpc_per_arcsec:
+            #print('dang!')
             return None, np.inf
         # Prior: Jacobian-predicted image shifts must not exceed 10 mas per image
         d_beta = np.array([src_x - source_x_init, src_y - source_y_init])
@@ -1496,21 +1513,32 @@ def source_optimizer_pso(
         fr_model_keep = np.array([mags[i + 1] / mags[0] for i in keep])
         resid = fr_model_keep - fr_data_keep
         chi2 = float(resid @ C_inv @ resid)
+        #print('chi2')
+        #print(chi2)
         return mags, chi2
 
-    rng = np.random.default_rng()
+    # Gate: skip PSO if zero-offset chi2 (fwhm_hi/2) is already too poor
+    _, chi2_zero_offset = _eval(source_x_init, source_y_init, fwhm_hi / 2)
+    if chi2_zero_offset >= 300:
+        return None, None, np.inf, None
+
+    rng = np.random.default_rng(seed)
     x_lo, x_hi = source_x_init - search_window, source_x_init + search_window
     y_lo, y_hi = source_y_init - search_window, source_y_init + search_window
 
+    # Initialise particles in polar (r, θ) so coverage is isotropic
+    r_init     = rng.uniform(0, search_window, n_particles)
+    theta_init = rng.uniform(0, 2 * np.pi, n_particles)
+    x_init     = source_x_init + r_init * np.cos(theta_init)
+    y_init     = source_y_init + r_init * np.sin(theta_init)
+
     if fit_fwhm:
-        pos = np.column_stack([rng.uniform(x_lo, x_hi, n_particles),
-                                rng.uniform(y_lo, y_hi, n_particles),
+        pos = np.column_stack([x_init, y_init,
                                 rng.uniform(fwhm_lo, fwhm_hi, n_particles)])
         lo_bounds = [x_lo, y_lo, fwhm_lo]
         hi_bounds = [x_hi, y_hi, fwhm_hi]
     else:
-        pos = np.column_stack([rng.uniform(x_lo, x_hi, n_particles),
-                                rng.uniform(y_lo, y_hi, n_particles)])
+        pos = np.column_stack([x_init, y_init])
         lo_bounds = [x_lo, y_lo]
         hi_bounds = [x_hi, y_hi]
 
@@ -1544,12 +1572,47 @@ def source_optimizer_pso(
         pos = np.clip(pos + vel, lo_bounds, hi_bounds)
 
     if verbose:
+        fwhm_best_verbose = float(gbest[2]) if fit_fwhm else fwhm_lo
+        dx_verbose = float(gbest[0]) - source_x_init
+        dy_verbose = float(gbest[1]) - source_y_init
+        r_pc_verbose = np.sqrt(dx_verbose**2 + dy_verbose**2) * kpc_per_arcsec * 1e3
         print(f'  PSO final best chi2:  {gbest_chi2:.4f}')
+        print(f'  best-fit FWHM:        {fwhm_best_verbose:.2f} pc')
+        print(f'  best-fit source offset: {r_pc_verbose:.3f} pc')
 
     # Compute summary stat at best position using flux_ratio_summary_statistic convention
     fr_best = gbest_mags[1:] / gbest_mags[0] if gbest_mags is not None else fr_data
     fr_best_keep = np.array([fr_best[i] for i in keep])
     stat = float(np.sqrt(np.sum(((fr_best_keep - fr_data_keep) / fr_data_keep) ** 2)) / len(keep))
+
+    # Image stamps at best-fit source position
+    fwhm_best = float(gbest[2]) if fit_fwhm else fwhm_lo
+    gs_base = auto_raytracing_grid_size(fwhm_best)
+    grid_size_list_best = ([r * gs_base for r in rescale_grid_size]
+                           if isinstance(rescale_grid_size, (list, np.ndarray))
+                           else [rescale_grid_size * gs_base] * N_images)
+    grid_res_best = rescale_grid_resolution * auto_raytracing_grid_resolution(fwhm_best)
+    d_beta_best = np.array([float(gbest[0]) - source_x_init, float(gbest[1]) - source_y_init])
+    x_pred_best = np.array([x_image[j] + (A_inv_list[j] @ d_beta_best)[0] for j in range(N_images)])
+    y_pred_best = np.array([y_image[j] + (A_inv_list[j] @ d_beta_best)[1] for j in range(N_images)])
+    src_model_best, kwargs_src_best = setup_gaussian_source(
+        fwhm_best, float(gbest[0]), float(gbest[1]), astropy_cosmo, z_source)
+    _, images = magnification_finite_decoupled(
+        src_model_best, kwargs_src_best,
+        x_pred_best, y_pred_best,
+        lens_model_init, kwargs_lens_init, kwargs_lens, index_lens_split,
+        grid_size_list_best, grid_res_best,
+        magnification_method=magnification_method,
+        rotation_angle_list=rot_arr,
+        hessian_eigenvalue_list=eig_arr,
+        use_vectorized_ray_shooting=use_vectorized_ray_shooting,
+        setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
+        groups=groups,
+    )
+
+    dx = float(gbest[0]) - source_x_init
+    dy = float(gbest[1]) - source_y_init
+    r_arcsec = np.sqrt(dx**2 + dy**2)
 
     optimizer_output = {
         'fwhm_lo':              fwhm_lo,
@@ -1558,11 +1621,15 @@ def source_optimizer_pso(
         'source_x_best':        float(gbest[0]),
         'source_y_best':        float(gbest[1]),
         'source_fwhm_best':     float(gbest[2]) if fit_fwhm else fwhm_lo,
+        'source_offset_r_arcsec': float(r_arcsec),
+        'source_offset_r_pc':     float(r_arcsec * kpc_per_arcsec * 1e3),
+        'source_offset_theta':    float(np.arctan2(dy, dx)),
+        'chi2_zero_offset':     float(chi2_zero_offset),
         'chi2_first_iter':      float(chi2_after_first_iter),
         'chi2_final':           float(gbest_chi2),
     }
 
-    return gbest_mags, stat, optimizer_output
+    return gbest_mags, images, stat, optimizer_output
 
 
 def setup_gaussian_source(source_fwhm_pc, source_x, source_y, astropy_cosmo, z_source):
