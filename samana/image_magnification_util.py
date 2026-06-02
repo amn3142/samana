@@ -1391,8 +1391,8 @@ def source_optimizer_pso(
     else:
         raise ValueError(f"source_optimizer_pso requires a UNIFORM or FIXED source size prior, got '{prior_type}'")
 
+    # search_window updated after image-size constraint tightens fwhm_hi below
     fwhm_max_arcsec = 1e-3 * fwhm_hi / kpc_per_arcsec
-    search_window   = fwhm_max_arcsec
 
     # Precompute lens model split if not provided
     if setup_decoupled_multiplane_lens_model_output is None:
@@ -1409,10 +1409,11 @@ def source_optimizer_pso(
         kwargs_full[idx] = kwargs_lens[j]
 
     # Compute full-model Hessian at each image: A_inv for image-position prediction,
-    # and rotation/eigenvalue for elliptical aperture (overrides checkpoint values if provided)
-    A_inv_list = []
-    rot_list   = []
-    eig_list   = []
+    # rotation/eigenvalue for elliptical aperture, and |λ_min| for image-size prior
+    A_inv_list  = []
+    rot_list    = []
+    eig_list    = []
+    lam_min_list = []
     for xi, yi in zip(x_image, y_image):
         f_xx, f_xy, f_yx, f_yy = lens_model_init.hessian(xi, yi, kwargs_full)
         A = np.array([[1.0 - float(f_xx), -float(f_xy)],
@@ -1423,9 +1424,19 @@ def source_optimizer_pso(
         A_inv_list.append(np.linalg.inv(A))
         rot_list.append(np.arctan2(v_min[1], v_min[0]))
         eig_list.append(abs(lam_min) / abs(lam_max))
+        lam_min_list.append(abs(lam_min))
 
     rot_arr = np.array(rot_list)
     eig_arr = np.array(eig_list)
+
+    # Prior: image-plane FWHM = source_fwhm / |λ_min| must not exceed 150 mas.
+    # The most magnified image (smallest |λ_min|) sets the tightest constraint.
+    MAX_IMAGE_FWHM_ARCSEC = 0.150
+    min_lam = min(lam_min_list)
+    fwhm_hi_image_constraint_pc = MAX_IMAGE_FWHM_ARCSEC * min_lam * kpc_per_arcsec * 1e3
+    fwhm_hi = min(fwhm_hi, fwhm_hi_image_constraint_pc)
+    if fwhm_hi < fwhm_lo:
+        return None, np.inf  # realization incompatible with prior + image-size constraint
 
     # Flux ratio data and uncertainty
     fr_data = np.array(measured_fluxes[1:], dtype=float) / measured_fluxes[0]
@@ -1471,7 +1482,8 @@ def source_optimizer_pso(
         chi2 = np.sum(((fr_model_keep - fr_data_keep) / sigma_fr) ** 2)
         return mags, chi2
 
-    # PSO initialisation
+    # PSO initialisation — search_window set by (possibly tightened) fwhm_hi
+    search_window = fwhm_max_arcsec
     rng = np.random.default_rng()
     x_lo, x_hi = source_x_init - search_window, source_x_init + search_window
     y_lo, y_hi = source_y_init - search_window, source_y_init + search_window
