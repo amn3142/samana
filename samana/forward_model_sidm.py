@@ -973,7 +973,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
             flux_ratios_data = list(
                 np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
         elif magnification_method == 'SOURCE_OPTIMIZER':
-            magnifications, stat, optimizer_output = source_optimizer_pso(
+            magnifications, images, stat, optimizer_output = source_optimizer_pso(
                 lens_model_init, kwargs_lens_init, kwargs_solution, index_lens_split,
                 data_class.x_image, data_class.y_image,
                 float(np.mean(source_x)), float(np.mean(source_y)),
@@ -990,10 +990,10 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 use_vectorized_ray_shooting=use_vectorized_ray_shooting,
                 groups=tnfw_groups,
                 verbose=verbose,
+                seed=seed,
             )
             if magnifications is None:
                 return output_vector_none
-            images = None
             flux_ratios = list(magnifications[1:] / magnifications[0])
             # Append optimizer diagnostics to source samples
             source_samples = np.append(source_samples, [
@@ -1003,13 +1003,18 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 optimizer_output['source_x_best'],
                 optimizer_output['source_y_best'],
                 optimizer_output['source_fwhm_best'],
+                optimizer_output['source_offset_r_arcsec'],
+                optimizer_output['source_offset_r_pc'],
+                optimizer_output['source_offset_theta'],
+                optimizer_output['chi2_zero_offset'],
                 optimizer_output['chi2_first_iter'],
                 optimizer_output['chi2_final'],
             ])
             source_param_names += [
                 'fwhm_lo', 'fwhm_hi', 'max_offset_pc',
                 'source_x_best', 'source_y_best', 'source_fwhm_best',
-                'chi2_first_iter', 'chi2_final',
+                'source_offset_r_arcsec', 'source_offset_r_pc', 'source_offset_theta',
+                'chi2_zero_offset', 'chi2_first_iter', 'chi2_final',
             ]
             flux_ratios_data = list(
                 np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
@@ -1225,49 +1230,49 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
             ax.annotate('magnification: '+str(np.round(mag,2)), xy=(0.3,0.9),
                         xycoords='axes fraction',color='w',fontsize=12)
         plt.show()
-        modelPlot = ModelPlot(data_class.kwargs_data_joint['multi_band_list'],
-                              kwargs_model, kwargs_result, arrow_size=0.02, cmap_string="gist_heat",
-                              fast_caustic=True,
-                              image_likelihood_mask_list=[data_class.likelihood_mask_imaging_weights])
         if use_imaging_data:
             chain_plot.plot_chain_list(chain_list, 0)
             print('num degrees of freedom: ', fitting_sequence.likelihoodModule.effective_num_data_points(**kwargs_result))
+            modelPlot = ModelPlot(data_class.kwargs_data_joint['multi_band_list'],
+                                  kwargs_model, kwargs_result,
+                                  fast_caustic=True,
+                                  image_likelihood_mask_list=[data_class.likelihood_mask_imaging_weights])
 
-        f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
-        modelPlot.data_plot(ax=axes[0, 0])
-        modelPlot.model_plot(ax=axes[0, 1])
-        modelPlot.normalized_residual_plot(ax=axes[0, 2], v_min=-6, v_max=6)
-        modelPlot.source_plot(ax=axes[1, 0], deltaPix_source=0.01, numPix=100)
-        modelPlot.convergence_plot(ax=axes[1, 1], v_max=1)
-        modelPlot.magnification_plot(ax=axes[1, 2])
+            f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
+            modelPlot.data_plot(ax=axes[0, 0])
+            modelPlot.model_plot(ax=axes[0, 1])
+            modelPlot.normalized_residual_plot(ax=axes[0, 2], vmin=-6, vmax=6)
+            modelPlot.source_plot(ax=axes[1, 0], deltaPix_source=0.01, numPix=100)
+            modelPlot.convergence_plot(ax=axes[1, 1], vmax=1)
+            modelPlot.magnification_plot(ax=axes[1, 2])
 
-        f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
-        modelPlot.decomposition_plot(ax=axes[0, 0], text='Lens light', lens_light_add=True, unconvolved=True)
-        modelPlot.decomposition_plot(ax=axes[1, 0], text='Lens light convolved', lens_light_add=True)
-        modelPlot.decomposition_plot(ax=axes[0, 1], text='Source light', source_add=True, unconvolved=True)
-        modelPlot.decomposition_plot(ax=axes[1, 1], text='Source light convolved', source_add=True)
-        modelPlot.decomposition_plot(ax=axes[0, 2], text='All components', source_add=True, lens_light_add=True,
-                                     unconvolved=True)
-        try:
-            modelPlot.decomposition_plot(ax=axes[1, 2], text='All components convolved', source_add=True,
-                                     lens_light_add=True, point_source_add=True)
-        except:
-            print('failed to create decomposition plot')
-        f.tight_layout()
-        f.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0., hspace=0.05)
-        plt.show()
+            f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
+            modelPlot.decomposition_plot(ax=axes[0, 0], text='Lens light', lens_light_add=True, unconvolved=True)
+            modelPlot.decomposition_plot(ax=axes[1, 0], text='Lens light convolved', lens_light_add=True)
+            modelPlot.decomposition_plot(ax=axes[0, 1], text='Source light', source_add=True, unconvolved=True)
+            modelPlot.decomposition_plot(ax=axes[1, 1], text='Source light convolved', source_add=True)
+            modelPlot.decomposition_plot(ax=axes[0, 2], text='All components', source_add=True, lens_light_add=True,
+                                         unconvolved=True)
+            try:
+                modelPlot.decomposition_plot(ax=axes[1, 2], text='All components convolved', source_add=True,
+                                         lens_light_add=True, point_source_add=True)
+            except:
+                print('failed to create decomposition plot')
+            f.tight_layout()
+            f.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0., hspace=0.05)
+            plt.show()
 
-        fig = plt.figure()
-        fig.set_size_inches(6, 6)
-        ax = plt.subplot(111)
-        kwargs_plot = {'ax': ax,
-                       'index_macromodel': list(np.arange(0, len(kwargs_result['kwargs_lens']))),
-                       'with_critical_curves': True,
-                       'v_min': -0.075, 'v_max': 0.075,
-                       'super_sample_factor': 5,
-                       'subtract_mean': False}
-        modelPlot.substructure_plot(band_index=0, **kwargs_plot)
-        plt.show()
+            fig = plt.figure()
+            fig.set_size_inches(6, 6)
+            ax = plt.subplot(111)
+            kwargs_plot = {'ax': ax,
+                           'index_macromodel': list(np.arange(0, len(kwargs_result['kwargs_lens']))),
+                           'with_critical_curves': True,
+                           'v_min': -0.075, 'v_max': 0.075,
+                           'super_sample_factor': 5,
+                           'subtract_mean': False}
+            modelPlot.substructure_plot(band_index=0, **kwargs_plot)
+            plt.show()
 
         fig = plt.figure()
         fig.set_size_inches(12, 12)
