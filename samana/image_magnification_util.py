@@ -1248,7 +1248,7 @@ def magnifications_adaptive(beta_grids, pixel_offsets, grid_resolution,
 
 def source_plane_pso(beta_grids, grid_resolution, source_x_init, source_y_init, source_sigma,
                      measured_fluxes, keep_flux_ratio_index,
-                     search_window=0.05, n_particles=20, n_iterations=50):
+                     search_window=0.05, n_particles=10, n_iterations=10):
     """
     PSO over source (x, y) position to minimize the flux ratio summary statistic.
 

@@ -303,7 +303,8 @@ class EPLModelBase(object):
                                      magnification_method='CIRCULAR_APERTURE',
                                      rotation_angle_list=None,
                                      hessian_eigenvalue_list=None,
-                                     use_vectorized_ray_shooting=True):
+                                     use_vectorized_ray_shooting=True,
+                                     groups=None):
         """
 
         :param source_model_quasar:
@@ -327,7 +328,8 @@ class EPLModelBase(object):
                                               magnification_method=magnification_method,
                                               rotation_angle_list=rotation_angle_list,
                                               hessian_eigenvalue_list=hessian_eigenvalue_list,
-                                              use_vectorized_ray_shooting=use_vectorized_ray_shooting)
+                                              use_vectorized_ray_shooting=use_vectorized_ray_shooting,
+                                              groups=groups)
         return mags
 
     def setup_kwargs_model(self, decoupled_multiplane=False, lens_model_list_halos=None,
