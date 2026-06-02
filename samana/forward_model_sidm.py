@@ -945,10 +945,9 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
             return [None] * 18
         grid_size_base = auto_raytracing_grid_size(source_dict['source_size_pc'])
         grid_resolution = rescale_grid_resolution * auto_raytracing_grid_resolution(source_dict['source_size_pc'])
-        print('grid_size_base')
-        print(grid_size_base)
-        print('grid_resolution')
-        print(grid_resolution)
+        if verbose:
+            print('grid_size_base', grid_size_base)
+            print('grid_resolution', grid_resolution)
         if isinstance(rescale_grid_size, list) or isinstance(rescale_grid_size, np.ndarray):
             assert len(rescale_grid_size) == len(data_class.x_image)
             grid_size_list = []
