@@ -8,7 +8,7 @@ from lenstronomy.Workflow.fitting_sequence import FittingSequence
 from lenstronomy.Util.class_creator import create_im_sim
 from lenstronomy.LensModel.QuadOptimizer.optimizer import Optimizer
 from samana.image_magnification_util import setup_gaussian_source, precompute_source_plane_grid, \
-    source_plane_pso, source_optimizer_pso
+    source_plane_pso, source_optimizer_pso, _build_tnfw_groups
 from samana.param_managers import auto_param_class
 from scipy.stats import multivariate_normal
 from copy import deepcopy
@@ -736,6 +736,12 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         ))
     if 'q' in param_names_macro_fixed and use_imaging_data:
         model_class.set_fixed_q(macromodel_samples_fixed_dict['q'])
+    # Build TNFW groups once per realization from the decoupled model output
+    if use_vectorized_ray_shooting and setup_decoupled_multiplane_lens_model_output is not None:
+        _lmf, _, _kwf, _, _, _, _ = setup_decoupled_multiplane_lens_model_output
+        tnfw_groups = _build_tnfw_groups(_lmf, _kwf)
+    else:
+        tnfw_groups = None
     kwargs_constraints = model_class.kwargs_constraints
     kwargs_likelihood = model_class.kwargs_likelihood
     kwargs_params = split_kwargs_params(kwargs_params, index_lens_split)
@@ -954,7 +960,6 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
         if magnification_method == 'SOURCE_PSO':
             kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(data_class.z_source).value
             source_sigma = 1e-3 * source_dict['source_size_pc'] / 2.354820 / kpc_per_arcsec
-            _, _, index_lens_split, _ = model_class.setup_lens_model()
             beta_grids, _pixel_offsets = precompute_source_plane_grid(
                 lens_model_init, kwargs_lens_init, kwargs_solution, index_lens_split,
                 data_class.x_image, data_class.y_image, grid_size_list, grid_resolution,
@@ -984,6 +989,7 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 flux_ratio_covariance_matrix=data_class.flux_ratio_covariance_matrix,
                 setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
                 use_vectorized_ray_shooting=use_vectorized_ray_shooting,
+                groups=tnfw_groups,
             )
             if magnifications is None:
                 return output_vector_none
@@ -1018,7 +1024,8 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                                                                                   magnification_method=magnification_method,
                                                                                   rotation_angle_list=rotation_angle_list,
                                                                                   hessian_eigenvalue_list=hessian_eigenvalue_list,
-                                                                                  use_vectorized_ray_shooting=use_vectorized_ray_shooting)
+                                                                                  use_vectorized_ray_shooting=use_vectorized_ray_shooting,
+                                                                                  groups=tnfw_groups)
             flux_uncertainty = None
             stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
                                                                                    magnifications,
