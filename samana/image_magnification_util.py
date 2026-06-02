@@ -1332,7 +1332,8 @@ def source_optimizer_pso(
         n_particles=20, n_iterations=10,
         setup_decoupled_multiplane_lens_model_output=None,
         use_vectorized_ray_shooting=True,
-        groups=None):
+        groups=None,
+        verbose=False):
     """
     PSO over source (x, y, FWHM) using magnification_finite_decoupled directly.
 
@@ -1533,10 +1534,15 @@ def source_optimizer_pso(
                 gbest_mags = mags
         if it == 0:
             chi2_after_first_iter = gbest_chi2
+            if verbose:
+                print(f'  PSO iter 1 best chi2: {chi2_after_first_iter:.4f}')
         r1  = rng.random(pos.shape)
         r2  = rng.random(pos.shape)
         vel = w * vel + c1 * r1 * (pbest - pos) + c2 * r2 * (gbest - pos)
         pos = np.clip(pos + vel, lo_bounds, hi_bounds)
+
+    if verbose:
+        print(f'  PSO final best chi2:  {gbest_chi2:.4f}')
 
     # Compute summary stat at best position using flux_ratio_summary_statistic convention
     fr_best = gbest_mags[1:] / gbest_mags[0] if gbest_mags is not None else fr_data
