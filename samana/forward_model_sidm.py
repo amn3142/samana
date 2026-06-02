@@ -1004,11 +1004,12 @@ def forward_model_single_iteration(data_class, model, preset_model_name, kwargs_
                 optimizer_output['source_y_best'],
                 optimizer_output['source_fwhm_best'],
                 optimizer_output['chi2_first_iter'],
+                optimizer_output['chi2_final'],
             ])
             source_param_names += [
                 'fwhm_lo', 'fwhm_hi', 'max_offset_pc',
                 'source_x_best', 'source_y_best', 'source_fwhm_best',
-                'chi2_first_iter',
+                'chi2_first_iter', 'chi2_final',
             ]
             flux_ratios_data = list(
                 np.array(data_class.magnifications[1:]) / data_class.magnifications[0])

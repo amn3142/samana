@@ -1557,6 +1557,7 @@ def source_optimizer_pso(
         'source_y_best':        float(gbest[1]),
         'source_fwhm_best':     float(gbest[2]) if fit_fwhm else fwhm_lo,
         'chi2_first_iter':      float(chi2_after_first_iter),
+        'chi2_final':           float(gbest_chi2),
     }
 
     return gbest_mags, stat, optimizer_output
