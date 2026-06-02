@@ -1519,7 +1519,8 @@ def source_optimizer_pso(
     gbest_mags = None
     w, c1, c2  = 0.7, 1.5, 1.5
 
-    for _ in range(n_iterations):
+    chi2_after_first_iter = np.inf
+    for it in range(n_iterations):
         for p in range(n_particles):
             fwhm_p = float(pos[p, 2]) if fit_fwhm else fwhm_lo
             mags, chi2 = _eval(pos[p, 0], pos[p, 1], fwhm_p)
@@ -1530,6 +1531,8 @@ def source_optimizer_pso(
                 gbest_chi2 = chi2
                 gbest      = pos[p].copy()
                 gbest_mags = mags
+        if it == 0:
+            chi2_after_first_iter = gbest_chi2
         r1  = rng.random(pos.shape)
         r2  = rng.random(pos.shape)
         vel = w * vel + c1 * r1 * (pbest - pos) + c2 * r2 * (gbest - pos)
@@ -1541,12 +1544,13 @@ def source_optimizer_pso(
     stat = float(np.sqrt(np.sum(((fr_best_keep - fr_data_keep) / fr_data_keep) ** 2)) / len(keep))
 
     optimizer_output = {
-        'fwhm_lo':         fwhm_lo,
-        'fwhm_hi':         fwhm_hi,
-        'max_offset_pc':   search_window * kpc_per_arcsec * 1e3,
-        'source_x_best':   float(gbest[0]),
-        'source_y_best':   float(gbest[1]),
-        'source_fwhm_best': float(gbest[2]) if fit_fwhm else fwhm_lo,
+        'fwhm_lo':              fwhm_lo,
+        'fwhm_hi':              fwhm_hi,
+        'max_offset_pc':        search_window * kpc_per_arcsec * 1e3,
+        'source_x_best':        float(gbest[0]),
+        'source_y_best':        float(gbest[1]),
+        'source_fwhm_best':     float(gbest[2]) if fit_fwhm else fwhm_lo,
+        'chi2_first_iter':      float(chi2_after_first_iter),
     }
 
     return gbest_mags, stat, optimizer_output
