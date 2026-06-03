@@ -84,17 +84,25 @@ class SingleGaussianMagnification(object):
                  rescale_grid_resolution,
                  magnification_method,
                  rotation_angle_list,
-                 hessian_eigenvalue_list):
+                 hessian_eigenvalue_list,
+                 use_vectorized_ray_shooting=True):
         self.astropy_cosmo = astropy_cosmo
         self.rescale_grid_size = rescale_grid_size
         self.rescale_grid_resolution = rescale_grid_resolution
         self.magnification_method = magnification_method
         self.rotation_angle_list = rotation_angle_list
         self.hessian_eigenvalue_list = hessian_eigenvalue_list
+        self.use_vectorized_ray_shooting = use_vectorized_ray_shooting
 
     def __call__(self, source_dict, source_x, source_y, astropy_cosmo, data_class, model_class,
                  lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output,
                  index_lens_split, seed=None):
+
+        if setup_decoupled_multiplane_lens_model_output is not None and self.use_vectorized_ray_shooting:
+            lmf, _, kwf, _, _, _, _ = setup_decoupled_multiplane_lens_model_output
+            groups = _build_tnfw_groups(lmf, kwf)
+        else:
+            groups = None
 
         source_model_quasar, kwargs_source = setup_gaussian_source(source_dict['source_size_pc'],
                                                                    np.mean(source_x), np.mean(source_y),
@@ -118,7 +126,9 @@ class SingleGaussianMagnification(object):
                                                                               setup_decoupled_multiplane_lens_model_output,
                                                                               magnification_method=self.magnification_method,
                                                                               rotation_angle_list=self.rotation_angle_list,
-                                                                              hessian_eigenvalue_list=self.hessian_eigenvalue_list)
+                                                                              hessian_eigenvalue_list=self.hessian_eigenvalue_list,
+                                                                              use_vectorized_ray_shooting=self.use_vectorized_ray_shooting,
+                                                                              groups=groups)
         flux_uncertainty = None
         stat, flux_ratios, flux_ratios_data = flux_ratio_summary_statistic(data_class.magnifications,
                                                                                magnifications,
