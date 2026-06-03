@@ -1,4 +1,4 @@
-from samana.image_magnification_util import setup_gaussian_source
+from samana.image_magnification_util import setup_gaussian_source, source_optimizer_pso, _build_tnfw_groups
 from samana.forward_model_util import flux_ratio_summary_statistic
 from lenstronomy.Util.magnification_finite_util import auto_raytracing_grid_size, auto_raytracing_grid_resolution
 
@@ -50,15 +50,29 @@ class ImageMagnificationBaseClass(object):
                  source_x,
                  source_y,
                  astropy_cosmo,
-                 z_source):
+                 data_class,
+                 model_class,
+                 lens_model_init,
+                 kwargs_lens_init,
+                 kwargs_solution,
+                 setup_decoupled_multiplane_lens_model_output,
+                 index_lens_split,
+                 seed=None):
         """
 
         :param source_dict: dictionary of keyword arguments for the lensed quasar source
         :param source_x: center of source x coordinate
         :param source_y: center of source y coordinate
         :param astropy_cosmo: an instance of astropy
-        :param z_source: source redshift
-        :return: magnifications, images, stat, flux_ratios, flux_ratios_data
+        :param data_class: data class instance
+        :param model_class: model class instance
+        :param lens_model_init: full lenstronomy LensModel
+        :param kwargs_lens_init: full lens kwargs
+        :param kwargs_solution: fitted macromodel kwargs
+        :param setup_decoupled_multiplane_lens_model_output: precomputed decoupled multiplane output
+        :param index_lens_split: indices of macromodel components in kwargs_lens_init
+        :param seed: random seed for reproducibility
+        :return: magnifications, images, stat, flux_ratios, flux_ratios_data, optimizer_output
         """
         raise Exception("This method should be implemented for each user defined class")
 
@@ -71,15 +85,6 @@ class SingleGaussianMagnification(object):
                  magnification_method,
                  rotation_angle_list,
                  hessian_eigenvalue_list):
-        """
-
-        :param astropy_cosmo:
-        :param rescale_grid_size:
-        :param rescale_grid_resolution:
-        :param magnification_method:
-        :param rotation_angle_list:
-        :param hessian_eigenvalue_list:
-        """
         self.astropy_cosmo = astropy_cosmo
         self.rescale_grid_size = rescale_grid_size
         self.rescale_grid_resolution = rescale_grid_resolution
@@ -88,7 +93,8 @@ class SingleGaussianMagnification(object):
         self.hessian_eigenvalue_list = hessian_eigenvalue_list
 
     def __call__(self, source_dict, source_x, source_y, astropy_cosmo, data_class, model_class,
-                 lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output):
+                 lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output,
+                 index_lens_split, seed=None):
 
         source_model_quasar, kwargs_source = setup_gaussian_source(source_dict['source_size_pc'],
                                                                    np.mean(source_x), np.mean(source_y),
@@ -102,8 +108,6 @@ class SingleGaussianMagnification(object):
                 grid_size_list.append(rescale_size * grid_size_base)
         else:
             grid_size_list = [self.rescale_grid_size * grid_size_base] * 4
-        # we pass in setup_decoupled_multiplane_lens_model_output, the decoupled multiplane parameters
-        # computed for the proposed macromodel in setup_kwargs_model
         magnifications, images = model_class.image_magnification_gaussian(source_model_quasar,
                                                                               kwargs_source,
                                                                               lens_model_init,
@@ -121,13 +125,55 @@ class SingleGaussianMagnification(object):
                                                                                 flux_uncertainty,
                                                                                data_class.keep_flux_ratio_index,
                                                                                data_class.uncertainty_in_fluxes)
-        return magnifications, images, stat, flux_ratios, flux_ratios_data
+        return magnifications, images, stat, flux_ratios, flux_ratios_data, None
 
 
+class SourceOptimizerMagnification(object):
+    """Compute magnifications by optimizing source position and size with a PSO."""
 
+    def __init__(self, rescale_grid_size, rescale_grid_resolution,
+                 n_particles=20, n_iterations=10,
+                 use_vectorized_ray_shooting=True,
+                 verbose=False):
+        self.rescale_grid_size = rescale_grid_size
+        self.rescale_grid_resolution = rescale_grid_resolution
+        self.n_particles = n_particles
+        self.n_iterations = n_iterations
+        self.use_vectorized_ray_shooting = use_vectorized_ray_shooting
+        self.verbose = verbose
 
+    def __call__(self, source_dict, source_x, source_y, astropy_cosmo, data_class, model_class,
+                 lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output,
+                 index_lens_split, seed=None):
 
+        if setup_decoupled_multiplane_lens_model_output is not None and self.use_vectorized_ray_shooting:
+            lmf, _, kwf, _, _, _, _ = setup_decoupled_multiplane_lens_model_output
+            groups = _build_tnfw_groups(lmf, kwf)
+        else:
+            groups = None
 
+        magnifications, images, stat, optimizer_output = source_optimizer_pso(
+            lens_model_init, kwargs_lens_init, kwargs_solution, index_lens_split,
+            data_class.x_image, data_class.y_image,
+            float(np.mean(source_x)), float(np.mean(source_y)),
+            source_dict['source_size_pc'],
+            data_class.magnifications, data_class.keep_flux_ratio_index,
+            data_class.z_source, astropy_cosmo,
+            magnification_method='ELLIPTICAL_APERTURE',
+            rescale_grid_size=self.rescale_grid_size,
+            rescale_grid_resolution=self.rescale_grid_resolution,
+            flux_ratio_covariance_matrix=data_class.flux_ratio_covariance_matrix,
+            setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
+            use_vectorized_ray_shooting=self.use_vectorized_ray_shooting,
+            groups=groups,
+            verbose=self.verbose,
+            seed=seed,
+        )
 
+        if magnifications is None:
+            return None, None, np.inf, None, None, None
 
+        flux_ratios = list(magnifications[1:] / magnifications[0])
+        flux_ratios_data = list(np.array(data_class.magnifications[1:]) / data_class.magnifications[0])
 
+        return magnifications, images, stat, flux_ratios, flux_ratios_data, optimizer_output

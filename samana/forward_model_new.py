@@ -658,10 +658,34 @@ def forward_model_single_iteration(data_class,
         if verbose:
             print('computing image magnifications...')
 
-        magnifications, images, stat, flux_ratios, flux_ratios_data = magnification_class(
+        magnifications, images, stat, flux_ratios, flux_ratios_data, optimizer_output = magnification_class(
             source_dict, source_x, source_y, astropy_cosmo, data_class, model_class,
-            lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output
-                                                     )
+            lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output,
+            index_lens_split, seed=seed,
+        )
+        if magnifications is None:
+            return output_vector_none
+        if optimizer_output is not None:
+            source_samples = np.append(source_samples, [
+                optimizer_output['fwhm_lo'],
+                optimizer_output['fwhm_hi'],
+                optimizer_output['max_offset_pc'],
+                optimizer_output['source_x_best'],
+                optimizer_output['source_y_best'],
+                optimizer_output['source_fwhm_best'],
+                optimizer_output['source_offset_r_arcsec'],
+                optimizer_output['source_offset_r_pc'],
+                optimizer_output['source_offset_theta'],
+                optimizer_output['chi2_zero_offset'],
+                optimizer_output['chi2_first_iter'],
+                optimizer_output['chi2_final'],
+            ])
+            source_param_names += [
+                'fwhm_lo', 'fwhm_hi', 'max_offset_pc',
+                'source_x_best', 'source_y_best', 'source_fwhm_best',
+                'source_offset_r_arcsec', 'source_offset_r_pc', 'source_offset_theta',
+                'chi2_zero_offset', 'chi2_first_iter', 'chi2_final',
+            ]
 
     tend = time()
     if verbose:
