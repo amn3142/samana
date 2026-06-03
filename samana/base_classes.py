@@ -131,22 +131,23 @@ class SingleGaussianMagnification(object):
 class SourceOptimizerMagnification(object):
     """Compute magnifications by optimizing source position and size with a PSO."""
 
-    def __init__(self, rescale_grid_size, rescale_grid_resolution,
-                 n_particles=20, n_iterations=10,
-                 use_vectorized_ray_shooting=True,
-                 verbose=False):
+    def __init__(self, rescale_grid_size, rescale_grid_resolution, **kwargs_pso):
+        """
+        :param rescale_grid_size: grid size multiplier passed to source_optimizer_pso
+        :param rescale_grid_resolution: grid resolution multiplier passed to source_optimizer_pso
+        :param kwargs_pso: any additional keyword arguments forwarded to source_optimizer_pso,
+            e.g. n_particles, n_iterations, use_vectorized_ray_shooting, verbose
+        """
         self.rescale_grid_size = rescale_grid_size
         self.rescale_grid_resolution = rescale_grid_resolution
-        self.n_particles = n_particles
-        self.n_iterations = n_iterations
-        self.use_vectorized_ray_shooting = use_vectorized_ray_shooting
-        self.verbose = verbose
+        self.kwargs_pso = kwargs_pso
 
     def __call__(self, source_dict, source_x, source_y, astropy_cosmo, data_class, model_class,
                  lens_model_init, kwargs_lens_init, kwargs_solution, setup_decoupled_multiplane_lens_model_output,
                  index_lens_split, seed=None):
 
-        if setup_decoupled_multiplane_lens_model_output is not None and self.use_vectorized_ray_shooting:
+        use_vectorized = self.kwargs_pso.get('use_vectorized_ray_shooting', True)
+        if setup_decoupled_multiplane_lens_model_output is not None and use_vectorized:
             lmf, _, kwf, _, _, _, _ = setup_decoupled_multiplane_lens_model_output
             groups = _build_tnfw_groups(lmf, kwf)
         else:
@@ -164,10 +165,9 @@ class SourceOptimizerMagnification(object):
             rescale_grid_resolution=self.rescale_grid_resolution,
             flux_ratio_covariance_matrix=data_class.flux_ratio_covariance_matrix,
             setup_decoupled_multiplane_lens_model_output=setup_decoupled_multiplane_lens_model_output,
-            use_vectorized_ray_shooting=self.use_vectorized_ray_shooting,
             groups=groups,
-            verbose=self.verbose,
             seed=seed,
+            **self.kwargs_pso,
         )
 
         if magnifications is None:
