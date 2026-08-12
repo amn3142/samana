@@ -238,8 +238,18 @@ def forward_model(output_path,
             params = np.append(params, logL_imaging_data)
             params = np.append(params, source_plane_image_solution)
             params = np.append(params, random_seed)
-            param_names = param_names_realization + param_names_source + ['bic', 'summary_statistic',
-                                                                          'logL_image_data', 'source_plane_sol','seed']
+            # stat is a scalar for a single-source magnification_class, but a per-source array
+            # (e.g. [stat_1, stat_2]) for a dual-source one like PSODoubleGaussianMagnification --
+            # one name per element is required, or every column after 'stat' silently shifts by
+            # (len(stat) - 1) positions relative to param_names (this was a real bug: dual-source
+            # runs were writing 2 stat values under a single 'summary_statistic' name, which
+            # shifted 'logL_image_data'/'source_plane_sol'/'seed' out of alignment with their
+            # actual columns, and left the true trailing seed column unnamed).
+            stat_arr = np.atleast_1d(stat)
+            stat_names = (['summary_statistic'] if len(stat_arr) == 1
+                          else ['summary_statistic_' + str(i + 1) for i in range(len(stat_arr))])
+            param_names = param_names_realization + param_names_source + ['bic'] + stat_names + [
+                'logL_image_data', 'source_plane_sol', 'seed']
             acceptance_ratio = accepted_realizations_counter / iteration_counter
 
             if parameter_array is None:
@@ -699,6 +709,12 @@ def forward_model_single_iteration(data_class,
         if verbose:
             print('computing image magnifications...')
 
+        # reset each iteration so a magnification-skip branch below (which never calls
+        # magnification_class) can't leave a stale last_fit from a previous iteration -- the
+        # hook after this block falls back to NaN placeholders when last_fit is None
+        if hasattr(magnification_class, 'last_fit'):
+            magnification_class.last_fit = None
+
         # don't care about magnifications if reconstructing imaging data
         if split_image_data_reconstruction and np.isinf(fr_logL_source_reconstruction):
             if verbose: print('skipping image magnification calculation')
@@ -723,6 +739,20 @@ def forward_model_single_iteration(data_class,
                 lens_model_init_batch, kwargs_lens_init_batch, halo_masses,
                 setup_decoupled_multiplane_lens_model_output_batch=setup_decoupled_multiplane_lens_model_output_batch,
                 verbose=verbose)
+
+    # record a PSO-fitting magnification_class's winning params (e.g. PSODoubleGaussianMagnification's
+    # source-2 offset/size) into the output alongside every other sampled parameter. Uses
+    # last_fit_param_names (always available, regardless of whether last_fit was actually
+    # populated this iteration) so every row has the same columns; NaN when this iteration's
+    # magnification_class call was skipped above (last_fit reset to None before that block).
+    if hasattr(magnification_class, 'last_fit_param_names'):
+        if magnification_class.last_fit is not None:
+            extra_values = [magnification_class.last_fit[name]
+                            for name in magnification_class.last_fit_param_names]
+        else:
+            extra_values = [np.nan] * len(magnification_class.last_fit_param_names)
+        source_samples = np.append(source_samples, extra_values)
+        source_param_names = source_param_names + list(magnification_class.last_fit_param_names)
 
     tend = time()
     if verbose:

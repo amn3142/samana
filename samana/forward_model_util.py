@@ -234,6 +234,12 @@ def sample_prior(kwargs_prior):
                 sample = kwargs_prior[param_name][1]
                 prior_samples_dict[param_name] = sample
                 continue
+            elif prior_type == 'PSO':
+                # not sampled here at all -- the value is fit elsewhere (e.g. by
+                # PSODoubleGaussianMagnification, which reads this same kwargs_prior dict
+                # directly for its search bounds) and recorded separately via that fit's own
+                # last_fit hook, not through prior_samples_dict/sample_list/sample_names.
+                continue
             elif prior_type == 'UNIFORM':
                 param_min, param_max = kwargs_prior[param_name][1], kwargs_prior[param_name][2]
                 sample = np.random.uniform(param_min, param_max)

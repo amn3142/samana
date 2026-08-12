@@ -452,33 +452,51 @@ def _as_interp(ri):
         return ri[0]
     return ri
 
-def mag_finite_single_image_distortion_adaptive(
+def mag_finite_single_image_distortion_adaptive_from_splits(
         source_model, kwargs_source, lens_model_fixed, lens_model_free, kwargs_lens_fixed,
         kwargs_lens, z_split, z_source, cosmo_bkg, x_image, y_image,
-        grid_resolution, grid_size_max, R_max, ray_interp_x, ray_interp_y,
-        kwargs_lens_free, n_coarse=20, rel_tol=1e-3, flux_floor_frac=1e-3,
+        grid_resolution, grid_size_max, plane_splits, kwargs_lens_free,
+        n_coarse=20, rel_tol=1e-3, flux_floor_frac=1e-3,
         rotation_angle=None, hessian_eigenvalue=None,
         lens_model_fixed_batched=None,
-        kwargs_lens_fixed_batched=None
+        kwargs_lens_fixed_batched=None,
+        grid_shift=(0.0, 0.0)
 ):
-    """Adaptive-tiling version of mag_finite_single_image_distortion"""
+    """Adaptive-tiling near/far magnification of a single image, given an ALREADY-BUILT
+    near/far split (`plane_splits`, from precompute_plane_splits). This is the flux-integration
+    half of mag_finite_single_image_distortion_adaptive, split out so the (expensive,
+    R_max-dependent) split can be computed once and reused across many magnification
+    evaluations -- e.g. once per image for a whole PSO run, instead of once per particle.
 
-    rix = _as_interp(ray_interp_x); riy = _as_interp(ray_interp_y)
-    redshift_planes = sorted(set(np.round(np.asarray(
-        lens_model_fixed.redshift_list, dtype=float), 8).tolist()))
-    if not any(np.isclose(z, z_split) for z in redshift_planes):
-        redshift_planes = sorted(redshift_planes + [float(z_split)])
+    No R_max param: R_max is only ever used to build plane_splits in the first place: once
+    plane_splits is given, accumulate_distortions never falls back to computing one, so R_max
+    (and the ray-angle interpolators / redshift_planes used only in that same fallback) are
+    dead here and not part of this function's contract.
 
+    :param plane_splits: precomputed near/far split (see precompute_plane_splits), built once
+        by the caller -- e.g. by the mag_finite_single_image_distortion_adaptive wrapper below,
+        or externally by a caller (like a PSO loop) that wants to reuse the same split across
+        many calls with different kwargs_source / grid_shift.
+    :param grid_shift: (dx, dy) added to the grid's angular offsets from x_image, y_image before
+        ray tracing, so the flux-collection grid can be recentered off the central ray (e.g. onto
+        a Hessian-predicted shifted image position for an offset source) without moving the
+        central ray/near-far split itself. Default (0.0, 0.0) reproduces the original,
+        un-shifted behavior. Applied consistently to both the near-far ray tracing AND the
+        exact point-source magnification used for the mu_discrepancy check below, so the two
+        are compared at the same (possibly shifted) image-plane location.
+    :return: (magnification, flux_array, tiling, mu_discrepancy) -- see
+        mag_finite_single_image_distortion_adaptive.
+    """
     beta_center = (kwargs_source[0]['center_x'], kwargs_source[0]['center_y'])
-    plane_splits = precompute_plane_splits(rix, riy, lens_model_fixed, kwargs_lens_fixed,
-                                           redshift_planes, cosmo_bkg, R_max, z_source)
 
     def ray_shoot(thx, thy):
-        ox = np.atleast_1d(thx) - x_image
-        oy = np.atleast_1d(thy) - y_image
+        ox = np.atleast_1d(thx) - x_image + grid_shift[0]
+        oy = np.atleast_1d(thy) - y_image + grid_shift[1]
+        # ray_angle_interp_x/y, redshift_planes, R_max are only consulted by
+        # accumulate_distortions when plane_splits is None (see docstring above) -- dead here.
         dbeta_x, dbeta_y = accumulate_distortions(
-            rix, riy, lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens,
-            redshift_planes, ox, oy, cosmo_bkg, z_source, z_split, R_max,
+            None, None, lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens,
+            None, ox, oy, cosmo_bkg, z_source, z_split, None,
             plane_splits=plane_splits)
         return beta_center[0] + dbeta_x, beta_center[1] + dbeta_y
 
@@ -504,7 +522,8 @@ def mag_finite_single_image_distortion_adaptive(
     kw_exact = kwargs_lens_fixed_batched if kwargs_lens_fixed_batched is not None else kwargs_lens_fixed
     mu_point = exact_point_source_magnification(
         lm_exact, lens_model_free, kw_exact, kwargs_lens_free, kwargs_lens,
-        z_split, z_source, cosmo_bkg, x_image, y_image, eps=grid_resolution)
+        z_split, z_source, cosmo_bkg, x_image + grid_shift[0], y_image + grid_shift[1],
+        eps=grid_resolution)
 
     eps = grid_resolution
     _tx = np.array([x_image + eps, x_image - eps, x_image, x_image])
@@ -520,6 +539,42 @@ def mag_finite_single_image_distortion_adaptive(
                       if mu_point > 0 and np.isfinite(mu_point_nearfar) else np.inf)
 
     return mag, flux_array, tiling, mu_discrepancy
+
+
+def mag_finite_single_image_distortion_adaptive(
+        source_model, kwargs_source, lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+        kwargs_lens, z_split, z_source, cosmo_bkg, x_image, y_image,
+        grid_resolution, grid_size_max, R_max, ray_interp_x, ray_interp_y,
+        kwargs_lens_free, n_coarse=20, rel_tol=1e-3, flux_floor_frac=1e-3,
+        rotation_angle=None, hessian_eigenvalue=None,
+        lens_model_fixed_batched=None,
+        kwargs_lens_fixed_batched=None
+):
+    """Adaptive-tiling version of mag_finite_single_image_distortion. Thin wrapper: builds the
+    near/far split (precompute_plane_splits) fresh, then delegates the actual flux integration
+    to mag_finite_single_image_distortion_adaptive_from_splits. Preserved for callers that want
+    the split computed and consumed in one call, as before; a caller that wants to reuse the
+    same split across many magnification evaluations (e.g. a PSO loop) should call
+    precompute_plane_splits + mag_finite_single_image_distortion_adaptive_from_splits directly
+    instead of going through this wrapper."""
+
+    rix = _as_interp(ray_interp_x); riy = _as_interp(ray_interp_y)
+    redshift_planes = sorted(set(np.round(np.asarray(
+        lens_model_fixed.redshift_list, dtype=float), 8).tolist()))
+    if not any(np.isclose(z, z_split) for z in redshift_planes):
+        redshift_planes = sorted(redshift_planes + [float(z_split)])
+
+    plane_splits = precompute_plane_splits(rix, riy, lens_model_fixed, kwargs_lens_fixed,
+                                           redshift_planes, cosmo_bkg, R_max, z_source)
+
+    return mag_finite_single_image_distortion_adaptive_from_splits(
+        source_model, kwargs_source, lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+        kwargs_lens, z_split, z_source, cosmo_bkg, x_image, y_image,
+        grid_resolution, grid_size_max, plane_splits, kwargs_lens_free,
+        n_coarse=n_coarse, rel_tol=rel_tol, flux_floor_frac=flux_floor_frac,
+        rotation_angle=rotation_angle, hessian_eigenvalue=hessian_eigenvalue,
+        lens_model_fixed_batched=lens_model_fixed_batched,
+        kwargs_lens_fixed_batched=kwargs_lens_fixed_batched)
 
 
 def mag_finite_single_image_distortion(
