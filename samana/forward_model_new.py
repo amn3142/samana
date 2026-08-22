@@ -45,7 +45,8 @@ def forward_model(output_path,
                   tolerance_source_reconstruction=None,
                   fr_logL_source_reconstruction=None,
                   return_astrometric_rejections=False,
-                  batch_lens_model=False
+                  batch_lens_model=False,
+                  tolerance_lens_equation_solution=1e-4
                   ):
     """
     Top-level function for forward modeling strong lenses with substructure. This function makes repeated calls to
@@ -99,6 +100,9 @@ def forward_model(output_path,
     should be abs(log_likelihood), which triggers the source light modeling if abs(logL) < fr_logL_source_reconstruction
     :param return_astrometric_rejections: if True, will return the macromodel parameters that produced a lens model that
     doesn't fit the image positions; if False, these solutions will be rejected and not saved as output
+    :param batch_lens_model: combines profiles at the same redshift into a single "batched" lens model and uses numpy
+    vectorization to compute deflection angles
+    :param tolerance_lens_equation_solution: sets the tolerance in the source plane for solving the lens equation for 4 images
     :return:
     """
 
@@ -212,7 +216,8 @@ def forward_model(output_path,
             fr_logL_source_reconstruction=fr_logL_source_reconstruction,
             scale_window_size_decoupled_multiplane=scale_window_size_decoupled_multiplane,
             return_astrometric_rejections=return_astrometric_rejections,
-            batch_lens_model=batch_lens_model)
+            batch_lens_model=batch_lens_model,
+            tolerance_lens_equation_solution=tolerance_lens_equation_solution)
 
         seed_counter += 1
         acceptance_rate_counter += 1
@@ -369,7 +374,8 @@ def forward_model_single_iteration(data_class,
                                    fr_logL_source_reconstruction=None,
                                    scale_window_size_decoupled_multiplane=1.0,
                                    return_astrometric_rejections=False,
-                                   batch_lens_model=False
+                                   batch_lens_model=False,
+                                   tolerance_lens_equation_solution=1e-4
                            ):
     """
 
@@ -447,7 +453,7 @@ def forward_model_single_iteration(data_class,
     realization_init = dark_matter_model_class(z_lens,
                                           data_class.z_source,
                                           realization_dict,
-                                               verbose=verbose)
+                                          verbose=verbose)
     if return_realization:
         return realization_init
     realization_init, ray_align_x, ray_align_y, _, _ = align_realization(realization_init,
@@ -471,6 +477,7 @@ def forward_model_single_iteration(data_class,
         data_class.x_image,
         data_class.y_image,
         realization_init,
+        log_mlow_sheets=realization_dict['log_mlow'],
         verbose=verbose)
     # perform additional operations on realization after operations in process halos
     realization = dark_matter_model_class.halo_modifications(
@@ -573,7 +580,6 @@ def forward_model_single_iteration(data_class,
             print(likelihood_module.log_likelihood(kwargs_result, verbose=True))
         kwargs_solution = kwargs_result['kwargs_lens']
         kwargs_multiplane_model = kwargs_model['kwargs_multiplane_model']
-
     else:
         image_data_grids_computed = False
         param_class_4pointsolver = model_class.param_class_4pointsolver(lens_model_init.lens_model_list,
@@ -678,7 +684,9 @@ def forward_model_single_iteration(data_class,
     if verbose and use_imaging_data:
         print('recovered source position: ', source_x, source_y)
     # verify that the lens equation is satisfied to high precision
-    source_plane_image_solution = check_lens_equation_solution(source_x, source_y, tolerance=0.0001)
+    source_plane_image_solution = check_lens_equation_solution(source_x,
+                                                               source_y,
+                                                               tolerance=tolerance_lens_equation_solution)
     output_vector_none = [None] * 18
     return_sampling_distribution = False
     if return_astrometric_rejections or return_sampling_distribution:
@@ -947,15 +955,17 @@ def forward_model_single_iteration(data_class,
         import matplotlib.pyplot as plt
         from samana.image_magnification_util import plot_tiled_image
 
-        for mag, image in zip(magnifications, images):
+        for ind, (mag, image) in enumerate(zip(magnifications, images)):
+            if image is None: break
             fig = plt.figure()
             ax = plt.subplot(111)
             if isinstance(image, list):  # adaptive: [flux_array, tiling]
-                plot_tiled_image(*image, ax=ax, show_cells=True)
+                plot_tiled_image(*image, ax=ax, show_cells=True, show_aperture=False)
             else:  # circular / elliptical / near-far: npix x npix grid
                 ax.imshow(image, origin='lower')
-            ax.annotate('magnification: ' + str(np.round(mag, 2)), xy=(0.3, 0.9),
-                        xycoords='axes fraction', color='w', fontsize=12)
+            ax.annotate('magnification: ' + str(np.round(mag, 2)), xy=(0.35, 0.9),
+                        xycoords='axes fraction', color='w', fontsize=14)
+
         modelPlot = ModelPlot(data_class.kwargs_data_joint['multi_band_list'],
                               kwargs_model, kwargs_result,
                               fast_caustic=True,
@@ -965,23 +975,26 @@ def forward_model_single_iteration(data_class,
             print('num degrees of freedom: ', fitting_sequence.likelihoodModule.effective_num_data_points(**kwargs_result))
 
         f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
-        modelPlot.data_plot(ax=axes[0, 0], vmin=-2, vmax=2)
-        modelPlot.model_plot(ax=axes[0, 1], vmin=-2, vmax=2)
+        modelPlot.data_plot(ax=axes[0, 0], vmin=-4, vmax=2)
+        modelPlot.model_plot(ax=axes[0, 1], vmin=-4, vmax=2)
         modelPlot.normalized_residual_plot(ax=axes[0, 2], vmin=-6, vmax=6)
-        modelPlot.source_plot(ax=axes[1, 0], delta_pix_source=0.01, num_pix=100)
+        modelPlot.source_plot(ax=axes[1, 0], delta_pix_source=0.01, num_pix=100, vmin=-5, vmax=-2)
         modelPlot.convergence_plot(ax=axes[1, 1], vmax=1)
         modelPlot.magnification_plot(ax=axes[1, 2])
 
         f, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=False, sharey=False)
         modelPlot.decomposition_plot(ax=axes[0, 0], kwargs_title={'text': 'Lens light'}, lens_light_add=True,
-                                     unconvolved=True)
-        modelPlot.decomposition_plot(ax=axes[1, 0], kwargs_title={'text': 'Lens light convolved'}, lens_light_add=True)
+                                     unconvolved=True, vmin=-2, vmax=2)
+        modelPlot.decomposition_plot(ax=axes[1, 0],
+                                     kwargs_title={'text': 'Lens light convolved'},
+                                     lens_light_add=True, vmin=-2, vmax=2)
         modelPlot.decomposition_plot(ax=axes[0, 1], kwargs_title={'text': 'Source light'}, source_add=True,
-                                     unconvolved=True)
-        modelPlot.decomposition_plot(ax=axes[1, 1], kwargs_title={'text': 'Source light convolved'}, source_add=True)
+                                     unconvolved=True, vmin=-2, vmax=2)
+        modelPlot.decomposition_plot(ax=axes[1, 1], kwargs_title={'text': 'Source light convolved'},
+                                     source_add=True, vmin=-2, vmax=2)
         modelPlot.decomposition_plot(ax=axes[0, 2], kwargs_title={'text': 'All components'}, source_add=True,
                                      lens_light_add=True,
-                                     unconvolved=True)
+                                     unconvolved=True, vmin=-2, vmax=2)
 
         try:
             modelPlot.decomposition_plot(ax=axes[1, 2], text='All components convolved', source_add=True,
@@ -998,9 +1011,9 @@ def forward_model_single_iteration(data_class,
         kwargs_plot = {'ax': ax,
                        'index_macromodel': list(np.arange(0, len(kwargs_result['kwargs_lens']))),
                        'with_critical_curves': True,
-                       'vmin': -0.075, 'vmax': 0.075,
+                       'vmin': -0.06, 'vmax': 0.06,
                        'super_sample_factor': 5,
-                       'subtract_mean': False}
+                       'subtract_mean': True}
         modelPlot.substructure_plot(band_index=0, **kwargs_plot)
         plt.show()
 

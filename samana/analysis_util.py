@@ -1,6 +1,7 @@
 import numpy as np
 from copy import deepcopy
 
+
 def default_rendering_area(lens_ID=None,
                            data_class=None,
                            model_class=None,
@@ -29,8 +30,9 @@ def raytracing_grid_orientation(lens_ID, min_q=0.25):
     :return: rotation angles and hessian eigenvalues
     """
     if lens_ID == 'J0248':
-        rotation_angle_list = np.array([-2.8, -1.21, -2.43, -0.63])
-        hessian_eigenvalue_list = np.array([0.13, 0.082, 0.091, 0.079])
+        #rotation_angle_list = np.array([0.5376, 1.8694, 0.8062, 2.4399])
+        rotation_angle_list = np.array([-2.8 + 0.2, -1.21, -2.43 + 0.2, -0.63 - 0.1])
+        hessian_eigenvalue_list = np.array([0.3, 0.3, 0.3, 0.3])
     elif lens_ID == 'J0607':
         rotation_angle_list = np.array([-2.4, -1.15, -0.26, -1.62])
         hessian_eigenvalue_list = np.array([0.118, 0.052, 0.014, 0.012])
@@ -112,6 +114,9 @@ def raytracing_grid_orientation(lens_ID, min_q=0.25):
     elif lens_ID == 'WGD2038':
         rotation_angle_list = np.array([-1.87, -2.58, -0.52, -0.67])
         hessian_eigenvalue_list = np.array([0.253, 0.202, 0.175, 0.364])
+    elif lens_ID == 'B2045':
+        rotation_angle_list = np.array([1.0, 1.15, 1.44, 0.0])
+        hessian_eigenvalue_list = np.array([0.2, 0.2, 0.2, 1.0])
     else:
         raise ValueError('lens_ID '+str(lens_ID)+' not recognized')
     hessian_eigenvalue_list[np.where(hessian_eigenvalue_list < min_q)[0]] = min_q
@@ -130,22 +135,17 @@ def numerics_setup(lens_ID):
     elif lens_ID == 'WFI2026':
         rescale_grid_size = [1.5, 1.5, 1.0, 1.0]
         rescale_grid_res = 1.5
-    elif lens_ID == 'B2045':
-        raise Exception('not yet implemented')
     elif lens_ID == 'HE0435':
         rescale_grid_size = 1.
         rescale_grid_res = 1.5
-    elif lens_ID == 'J0248':
-        rescale_grid_size = 2.0
-        rescale_grid_res = 1.5
-    elif lens_ID == 'J0248_HST':
-        rescale_grid_size = 2.5
+    elif lens_ID in ['J0248', 'J0248_HST']:
+        rescale_grid_size = [2.5, 2.5, 2.5, 2.5]
         rescale_grid_res = 1.5
     elif lens_ID in ['J0259', 'J0259_HST_475X']:
         rescale_grid_size = 1.4
         rescale_grid_res = 1.5
     elif lens_ID == 'J0607':
-        rescale_grid_res = 1.5
+        rescale_grid_res = 1.4
         rescale_grid_size = [2.5, 4.0, 5.0, 2.5]
     elif lens_ID == 'J0608':
         rescale_grid_size = 2.0
@@ -188,7 +188,7 @@ def numerics_setup(lens_ID):
         rescale_grid_size = [1., 1., 3.0, 3.0]
     elif lens_ID == 'PSJ0147':
         rescale_grid_res = [1.5, 1.5, 1.5, 1.0]
-        rescale_grid_size = [3.0, 2.5, 2.5, 0.1]
+        rescale_grid_size = [3.0, 2.5, 2.5, 0.3]
     elif lens_ID == 'PSJ1606':
         rescale_grid_res = 1.1
         rescale_grid_size = 0.6
@@ -225,6 +225,9 @@ def numerics_setup(lens_ID):
     elif lens_ID == 'H1113':
         rescale_grid_res = 1.5
         rescale_grid_size = 1.
+    elif lens_ID == 'B2045':
+        rescale_grid_res = 1.0
+        rescale_grid_size = [4.0, 4.0, 4.0, 0.5]
     else:
         raise Exception('lens ID '+str(lens_ID)+' not recognized!')
     return rescale_grid_size, rescale_grid_res
@@ -356,7 +359,13 @@ def quick_setup(lens_ID, use_qgrad=False):
         if use_qgrad:
             from samana.Model.j0607_model import J0607ModelEPLM3M4Shear_Qgrad as model_class
         else:
-            from samana.Model.j0607_model import J0607ModelEPLM3M4Shear as model_class
+            from samana.Model.j0607_model import J0607ModelEPLM1M3M4Shear as model_class
+    elif lens_ID == 'J0607_HST':
+        from samana.Data.j0607 import J0607_HSTF160W as data_class
+        if use_qgrad:
+            from samana.Model.j0607_model import J0607ModelEPLM3M4Shear_Qgrad as model_class
+        else:
+            from samana.Model.j0607_model import J0607ModelEPLM1M3M4ShearHST as model_class
     elif lens_ID == 'J0608':
         from samana.Data.j0608 import J0608_MIRI as data_class
         if use_qgrad:
@@ -366,9 +375,9 @@ def quick_setup(lens_ID, use_qgrad=False):
     elif lens_ID == 'J0659':
         from samana.Data.j0659 import J0659_MIRI as data_class
         if use_qgrad:
-            from samana.Model.j0659_model import J0659ModelEPLM3M4Shear_Qgrad as model_class
+            from samana.Model.j0659_model import J0659ModelEPLM1M3M4Shear_Qgrad as model_class
         else:
-            from samana.Model.j0659_model import J0659ModelEPLM3M4Shear as model_class
+            from samana.Model.j0659_model import J0659ModelEPLM1M3M4Shear as model_class
     elif lens_ID == 'J1042':
         from samana.Data.j1042 import J1042_HST_160W as data_class
         if use_qgrad:

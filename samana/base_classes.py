@@ -85,8 +85,11 @@ class SingleGaussianMagnification(object):
                  magnification_method,
                  rotation_angle_list,
                  hessian_eigenvalue_list,
-                 fallback='ELLIPTICAL_APERTURE',
-                 mu_tolerance=0.05):
+                 fallback='ADAPTIVE',
+                 mu_tolerance=0.05,
+                 kwargs_adaptive_tiling=None,
+                 R_max_splitting=0.4,
+                 freeze_background=False):
         """
 
         :param astropy_cosmo:
@@ -104,6 +107,9 @@ class SingleGaussianMagnification(object):
         self.hessian_eigenvalue_list = hessian_eigenvalue_list
         self.fallback = fallback
         self.mu_tolerance = mu_tolerance
+        self.kwargs_adaptive_tiling = kwargs_adaptive_tiling
+        self.R_max_splitting = R_max_splitting
+        self.freeze_background = freeze_background
         self._mu_discrepancy_list = None
 
     @property
@@ -160,6 +166,7 @@ class SingleGaussianMagnification(object):
         source_model_quasar, kwargs_source = setup_gaussian_source(source_dict['source_size_pc'],
                                                                    np.mean(source_x), np.mean(source_y),
                                                                    self.astropy_cosmo, data_class.z_source)
+
         if isinstance(self.rescale_grid_resolution, list):
             grid_resolution_list = [grid_res_i * auto_raytracing_grid_resolution(
                 source_dict['source_size_pc']) for grid_res_i in self.rescale_grid_resolution]
@@ -187,6 +194,9 @@ class SingleGaussianMagnification(object):
                                                                               fallback=self.fallback,
                                                                               mu_tolerance=self.mu_tolerance,
                                                                               R_max_grid_size_list=R_max_grid_size_list,
+                                                                              R_max_0=self.R_max_splitting,
+                                                                              kwargs_adaptive_tiling=self.kwargs_adaptive_tiling,
+                                                                              freeze_background=self.freeze_background,
                                                                               verbose=verbose)
         if self.magnification_method in ['NEAR_FAR_SPLITTING', 'NEAR_FAR_SPLITTING_ADAPTIVE']:
             self._mu_discrepancy_list = mu_discrepancy

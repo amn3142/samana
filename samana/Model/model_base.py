@@ -311,6 +311,9 @@ class EPLModelBase(object):
                                      fallback='ELLIPTICAL_APERTURE',
                                      mu_tolerance=0.05,
                                      R_max_grid_size_list=None,
+                                     kwargs_adaptive_tiling=None,
+                                     R_max_0=0.4,
+                                     freeze_background=False,
                                      verbose=False):
         """
 
@@ -342,6 +345,9 @@ class EPLModelBase(object):
             fallback=fallback,
             MU_TOLERANCE=mu_tolerance,
             R_max_grid_size_list=R_max_grid_size_list,
+            kwargs_adaptive_tiling=kwargs_adaptive_tiling,
+            R_max_0=R_max_0,
+            freeze_background=freeze_background,
             verbose=verbose)
 
         return mags

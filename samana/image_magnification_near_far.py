@@ -54,8 +54,7 @@ def _cached_lens_model(names):
 
 def distortion_field_at_lens_plane(x_co, y_co, x_center_at_plane, y_center_at_plane,
                                    T_z, lens_model_exact, lens_model_far,
-                                   kwargs_lens_exact, kwargs_lens_far, kappa_near=0.0,
-                                   subtract_near_kappa=False, subtract_far_kappa=False):
+                                   kwargs_lens_exact, kwargs_lens_far):
     """Reduced distortion-deflection of the grid rays at one lens plane, referenced to
     the central ray (the deflection at the central ray is zero by construction).
 
@@ -71,13 +70,6 @@ def distortion_field_at_lens_plane(x_co, y_co, x_center_at_plane, y_center_at_pl
         centered at (x_center_at_plane, y_center_at_plane) so alpha_far(center) = 0
     :param kwargs_lens_exact: kwargs for lens_model_exact
     :param kwargs_lens_far: kwargs for lens_model_far
-    :param kappa_near: mean convergence of the near halos within R_max (from
-        lens_models_at_z); only used if subtract_near_kappa is True
-    :param subtract_near_kappa: if True, subtract the near halos' mean-convergence sheet
-        (removes the 0th-order magnification boost from locally adding mass). Default
-        False -- see module note; leaving it on double-removes the mean field.
-    :param subtract_far_kappa: if True, also subtract the far field's net convergence.
-        Default False.
     :return: (ax, ay), the reduced distortion-deflection components of the grid rays at
         this plane (zero at the central ray)
     """
@@ -95,24 +87,119 @@ def distortion_field_at_lens_plane(x_co, y_co, x_center_at_plane, y_center_at_pl
     ax = ax_exact + ax_far - ax_c
     ay = ay_exact + ay_far - ay_c
 
-    # ---- optionally remove the 0th-order (mean-convergence) effect of the added halos ----
-    kappa_sheet = 0.0
-    if subtract_near_kappa:
-        kappa_sheet += kappa_near                                    # mean near-halo convergence
-    if subtract_far_kappa:
-        fxx, fxy, fyx, fyy = lens_model_far.hessian(
-            x_center_at_plane, y_center_at_plane, kwargs_lens_far)   # far field is smooth -> Hessian trace = its convergence
-        kappa_sheet += 0.5 * (fxx + fyy)
-    if kappa_sheet != 0.0:
-        lm_k = LensModel(['CONVERGENCE'])
-        kw_k = [{'kappa': -kappa_sheet, 'ra_0': x_center_at_plane, 'dec_0': y_center_at_plane}]  # cancels the sheet
-        axk, ayk = lm_k.alpha(theta_x, theta_y, kw_k)
-        ax = ax + axk
-        ay = ay + ayk
     return ax, ay
 
+def build_plane_index(lens_model_fixed, kwargs_lens_fixed, R_max, exclude_names=()):
+    """Parse the fixed model into flat arrays ONCE so that lens_models_at_z does not have
+    to walk the full halo list (and rebuild the redshift array) at every lens plane.
+
+    Everything here depends only on (lens_model_fixed, kwargs_lens_fixed, R_max), all of
+    which are constant across the planes of an image and across the images of an
+    iteration, whereas the central-ray position that lens_models_at_z tests against is
+    not. Halos are bucketed by redshift up front, so selecting the halos at a plane costs
+    O(n_unique_z) instead of an np.isclose scan over every halo.
+
+    :param lens_model_fixed: the multiplane LensModel of the fixed (halo) deflectors
+    :param kwargs_lens_fixed: kwargs for lens_model_fixed
+    :param R_max: near/far angular split radius; scalar or per-halo array (see lens_models_at_z)
+    :param exclude_names: profile names to skip entirely
+    :return: dict consumed by lens_models_at_z
+    """
+    names = list(lens_model_fixed.lens_model_list)
+    zlist = np.asarray(lens_model_fixed.redshift_list, dtype=float)
+    n = len(names)
+
+    center_x = np.full(n, np.nan)
+    center_y = np.full(n, np.nan)
+    for i in range(n):
+        kw = kwargs_lens_fixed[i]
+        if isinstance(kw, dict):
+            center_x[i] = kw.get('center_x', np.nan)
+            center_y[i] = kw.get('center_y', np.nan)
+
+    R_max_arr = np.atleast_1d(np.asarray(R_max, dtype=float))
+    scalar_rmax = R_max_arr.size == 1
+    n_extra = 0 if scalar_rmax else max(n - R_max_arr.size, 0)
+    r_split = np.empty(n)
+    force_near = np.zeros(n, dtype=bool)
+    if scalar_rmax:
+        r_split[:] = R_max_arr[0]
+    else:
+        for i in range(n):
+            j = i - n_extra
+            if 0 <= j < R_max_arr.size:
+                r_split[i] = R_max_arr[j]
+            else:
+                r_split[i] = np.inf
+                force_near[i] = True
+
+    keep = np.ones(n, dtype=bool)
+    if exclude_names:
+        for i in range(n):
+            if names[i] in exclude_names:
+                keep[i] = False
+
+    # bucket halo indices by unique redshift; a plane query then only has to np.isclose
+    # against the (short) unique-redshift list rather than every halo
+    unique_z, inverse = np.unique(zlist, return_inverse=True)
+    order = np.argsort(inverse, kind='stable')
+    bounds = np.concatenate([[0], np.cumsum(np.bincount(inverse, minlength=unique_z.size))])
+    buckets = [order[bounds[k]:bounds[k + 1]] for k in range(unique_z.size)]
+
+    return {'names': names, 'center_x': center_x, 'center_y': center_y,
+            'r_split': r_split, 'force_near': force_near, 'keep': keep,
+            'unique_z': unique_z, 'buckets': buckets, 'n': n}
+
+
+def _indices_at_z(plane_index, z):
+    """Halo indices at redshift z, matching np.where(np.isclose(redshift_list, z))[0]
+    exactly (np.isclose on the unique redshifts selects the same halos, since every halo
+    in a bucket shares one redshift value).
+
+    :param plane_index: output of build_plane_index
+    :param z: lens-plane redshift
+    :return: ascending array of indices into lens_model_list
+    """
+    hits = np.flatnonzero(np.isclose(plane_index['unique_z'], z))
+    if hits.size == 0:
+        return np.empty(0, dtype=int)
+    if hits.size == 1:
+        return plane_index['buckets'][hits[0]]
+    return np.sort(np.concatenate([plane_index['buckets'][k] for k in hits]))
+
+
+def _split_near_far(plane_index, at_z, x_center_at_plane, y_center_at_plane):
+    """Vectorized near/far partition of the halos at one plane.
+
+    Reproduces the original per-halo predicate exactly, including that only center_x is
+    tested for finiteness and that np.hypot (not a squared-distance comparison) sets the
+    boundary:
+
+        force_near or (isfinite(center_x) and isfinite(r_split)
+                       and hypot(dx, dy) <= r_split)
+
+    :param plane_index: output of build_plane_index
+    :param at_z: indices of halos at this plane
+    :param x_center_at_plane: angular x of the central ray at this plane
+    :param y_center_at_plane: angular y of the central ray at this plane
+    :return: (near_idx, far_idx), both ascending
+    """
+    if at_z.size == 0:
+        return at_z, at_z
+    at_z = at_z[plane_index['keep'][at_z]]
+    if at_z.size == 0:
+        return at_z, at_z
+    cx = plane_index['center_x'][at_z]
+    cy = plane_index['center_y'][at_z]
+    r = plane_index['r_split'][at_z]
+    with np.errstate(invalid='ignore'):
+        within = np.hypot(cx - x_center_at_plane, cy - y_center_at_plane) <= r
+    near = plane_index['force_near'][at_z] | (np.isfinite(cx) & np.isfinite(r) & within)
+    return at_z[near], at_z[~near]
+
 def precompute_plane_splits(ray_angle_interp_x, ray_angle_interp_y, lens_model_fixed,
-                            kwargs_lens_fixed, redshift_planes, cosmo_bkg, R_max, z_source):
+                            kwargs_lens_fixed, redshift_planes, cosmo_bkg, R_max, z_source,
+                            plane_index=None):
     """Precompute the per-plane near/far split ONCE for an image (it depends only on the
     fixed central ray, not on the annulus grid points, so it is identical for every
     annulus). Reuse the result across annuli to avoid re-splitting the halos and
@@ -133,22 +220,32 @@ def precompute_plane_splits(ray_angle_interp_x, ray_angle_interp_y, lens_model_f
     splits = []
     d0s = cosmo_bkg.d_xy(0, z_source)
     z_prev = 0.0
+    # parse the fixed model once and reuse it at every plane
+    if plane_index is None:
+        plane_index = build_plane_index(lens_model_fixed, kwargs_lens_fixed, R_max)
     for zi in redshift_planes:
         T_z = cosmo_bkg.T_xy(0, zi)
         x_center = float(ray_angle_interp_x(T_z))
         y_center = float(ray_angle_interp_y(T_z))
-        (lm_e, kw_e), (lm_f, kw_f), kn = lens_models_at_z(
-            zi, lens_model_fixed, kwargs_lens_fixed, x_center, y_center, R_max)
-        splits.append({'zi': zi, 'T_z': T_z, 'x_center': x_center, 'y_center': y_center,
-                       'lm_exact': lm_e, 'kw_exact': kw_e, 'lm_far': lm_f, 'kw_far': kw_f,
-                       'kappa_near': kn, 'delta_T': cosmo_bkg.T_xy(z_prev, zi),
+        (lm_e, kw_e), (lm_f, kw_f) = lens_models_at_z(
+            zi, lens_model_fixed, kwargs_lens_fixed, x_center, y_center, R_max,
+            plane_index=plane_index)
+        splits.append({'zi': zi,
+                       'T_z': T_z,
+                       'x_center': x_center,
+                       'y_center': y_center,
+                       'lm_exact': lm_e,
+                       'kw_exact': kw_e,
+                       'lm_far': lm_f,
+                       'kw_far': kw_f,
+                       'delta_T': cosmo_bkg.T_xy(z_prev, zi),
                        'factor': d0s / cosmo_bkg.d_xy(zi, z_source)})
         z_prev = zi
     return splits
 
 def lens_models_at_z(z, lens_model_fixed, kwargs_lens_fixed,
                      x_center_at_plane, y_center_at_plane, R_max,
-                     exclude_names=(), verbose=False):
+                     exclude_names=(), verbose=False, plane_index=None):
     """Split the fixed-model halos at redshift z into a near/exact single-plane LensModel
     and a single far-field HESSIAN about the central ray. Distance is measured in the sky
     (angular) plane to the central-ray position at z. A halo is "near" if it has a finite
@@ -168,60 +265,34 @@ def lens_models_at_z(z, lens_model_fixed, kwargs_lens_fixed,
     :param exclude_names: profile names to skip entirely. Default () -- nothing is
         excluded. In particular CONVERGENCE sheets are kept (they fold exactly into the
         far Hessian); excluding them drops the pyHalo mean-field and biases the result.
+    :param plane_index: optional output of build_plane_index for this (lens_model_fixed,
+        kwargs_lens_fixed, R_max). Passing it avoids re-parsing the full halo list at every
+        plane; built on the fly when omitted. Must be rebuilt whenever the halo population
+        or R_max changes.
     :return: (lens_model_exact, kwargs_lens_exact), (lens_model_far, kwargs_lens_far),
-        kappa_near -- the near/exact model, the single far-field HESSIAN model, and the
-        mean convergence of the near halos within R_max
+         -- the near/exact model, the single far-field HESSIAN model
     """
-    zlist = np.asarray(lens_model_fixed.redshift_list, dtype=float)
-    names = lens_model_fixed.lens_model_list
-    at_z = np.where(np.isclose(zlist, z))[0]
+    if plane_index is None:
+        plane_index = build_plane_index(lens_model_fixed, kwargs_lens_fixed, R_max,
+                                       exclude_names=exclude_names)
+    names = plane_index['names']
+    at_z = _indices_at_z(plane_index, z)
+    near_idx, far_idx = _split_near_far(plane_index, at_z,
+                                        x_center_at_plane, y_center_at_plane)
 
-    # R_max may be a scalar (shared) or a per-halo array indexed like lens_model_list
-    R_max_arr = np.atleast_1d(np.asarray(R_max, dtype=float))
-    scalar_rmax = R_max_arr.size == 1
-    # lens_model_fixed can LEAD with non-halo macro deflectors absent from the per-halo
-    # R_max array -- e.g. HE0435's SIS background galaxy at another plane, which
-    # index_lens_split=[0,1] leaves in the fixed model. These
-    # occupy the first n_extra fixed indices, so offset the lookup
-    n_extra = 0 if scalar_rmax else max(len(names) - R_max_arr.size, 0)
-
-    near_names, near_kw, far_idx = [], [], []
-
-    for i in at_z:
-        if names[i] in exclude_names:  # skip mass sheets etc. entirely
-            continue
-        kw = kwargs_lens_fixed[i]
-        cxi = kw.get('center_x', np.nan) if isinstance(kw, dict) else np.nan
-        cyi = kw.get('center_y', np.nan) if isinstance(kw, dict) else np.nan
-        force_near = False
-        if scalar_rmax:
-            rmi = R_max_arr[0]
-        else:
-            j = i - n_extra
-            if 0 <= j < R_max_arr.size:
-                rmi = R_max_arr[j]
-            else:
-                rmi, force_near = np.inf, True  # extra macro deflector (bkg galaxy) -> keep exact
-        if force_near or (np.isfinite(cxi) and np.isfinite(rmi)
-                          and np.hypot(cxi - x_center_at_plane, cyi - y_center_at_plane) <= rmi):
-            near_names.append(names[i])
-            near_kw.append(kw)
-        else:
-            far_idx.append(i)
+    near_names = [names[i] for i in near_idx]
+    near_kw = [kwargs_lens_fixed[i] for i in near_idx]
 
     lens_model_exact = _cached_lens_model(near_names)
     kwargs_lens_exact = near_kw
 
-    kappa_near = 0.0
-    # far field: sum the far halos' Hessian at the central ray, represent as one HESSIAN.
-    # Group the far halos into MULTI_HALO_BATCH entries (per profile type) so the Hessian
-    # sum is vectorized; CONVERGENCE sheets pass through individually.
-    if far_idx:
+    # far field: sum the far halos' Hessian at the central ray
+    if far_idx.size:
         from samana.forward_model_util import batch_lens_profiles
         far_names_in = [names[i] for i in far_idx]
         far_kw_in = [kwargs_lens_fixed[i] for i in far_idx]
         far_z = [0.0] * len(far_idx)  # single plane; z unused by the hessian
-        to_batch = set(far_names_in) - {'CONVERGENCE'}  # don't batch mass sheets or GCs
+        to_batch = set(far_names_in) - {'CONVERGENCE'}  # don't batch mass sheets
         b_names, _, b_kw = batch_lens_profiles(far_names_in, far_z, far_kw_in,
                                                profiles_to_batch=to_batch, min_group=4)
         lm_far_full = _cached_lens_model(b_names)
@@ -232,15 +303,15 @@ def lens_models_at_z(z, lens_model_fixed, kwargs_lens_fixed,
     kwargs_lens_far = [{'f_xx': float(fxx), 'f_xy': float(fxy),
                         'f_yx': float(fyx), 'f_yy': float(fyy),
                         'ra_0': x_center_at_plane, 'dec_0': y_center_at_plane}]
-    return (lens_model_exact, kwargs_lens_exact), (lens_model_far, kwargs_lens_far), float(kappa_near)
+    return (lens_model_exact, kwargs_lens_exact), (lens_model_far, kwargs_lens_far)
 
 
 def accumulate_distortions(ray_angle_interp_x, ray_angle_interp_y,
                            lens_model_fixed, lens_model_free,
-                           kwargs_lens_fixed, kwargs_lens_free,
+                           kwargs_lens_fixed, kwargs_macro,
                            redshift_planes, x_grid, y_grid,
                            cosmo_bkg, z_source, z_split, R_max,
-                           plane_splits=None, verbose=False):
+                           plane_splits=None, kwargs_macro_lin=None, verbose=False):
     """Propagate the grid rays as a distortion around the central ray and return their
     DEVIATION source-plane positions (the caller adds beta_center for the absolute beta).
     Marches plane by plane in comoving coordinates, at each plane splitting the halos
@@ -254,66 +325,80 @@ def accumulate_distortions(ray_angle_interp_x, ray_angle_interp_y,
     :param lens_model_fixed: multiplane LensModel of the fixed (halo) deflectors
     :param lens_model_free: single-plane LensModel of the free/macro deflector at z_split
     :param kwargs_lens_fixed: kwargs for lens_model_fixed
-    :param kwargs_lens_free: kwargs for lens_model_free (the macro model)
+    :param kwargs_macro: kwargs for lens_model_free -- the CONVERGED macromodel
+        (kwargs_solution). This is the deflector at z_split whose shear and convergence
+        enter the Jacobian, so it must be the converged model.
     :param redshift_planes: sorted list of lens-plane redshifts to traverse (must include z_split)
     :param x_grid: initial angular x offsets of the grid rays from the central ray
     :param y_grid: initial angular y offsets of the grid rays from the central ray
     :param cosmo_bkg: lenstronomy Background (provides T_xy comoving and d_xy angular distances)
     :param z_source: source redshift
     :param z_split: redshift of the free/macro deflector (the "main" plane)
-    :param R_max: near/far angular split radius (scalar; or mass-scale it in lens_models_at_z)
-    :param z_source_convention: redshift the fixed model's reduced deflections are defined
-        against; defaults to z_source. The per-plane reduced->physical factor is
-        d_xy(0, z_conv) / d_xy(z_plane, z_conv), matching lenstronomy's
-        MultiPlaneBase._reduced2physical_deflection.
+    :param R_max: near/far angular split radius (scalar; or mass-scale it in lens_models_at_z
+    :param kwargs_macro_lin: the macromodel the decoupled multi-plane model was computed with.
+    Halos at planes BEHIND z_split are evaluated on the path THIS macro produces
     :return: (dbeta_x, dbeta_y), the deviation source-plane positions of the grid rays
         relative to the central ray
     """
 
-    # grid rays start at the observer: comoving position 0, angle = grid offset
     x_co = np.zeros_like(x_grid, dtype=float)
     y_co = np.zeros_like(y_grid, dtype=float)
     alpha_x = np.array(x_grid, dtype=float)
     alpha_y = np.array(y_grid, dtype=float)
+
+    x_co_lin = y_co_lin = alpha_x_lin = alpha_y_lin = None
+    freeze_background = kwargs_macro_lin is not None
+    factor_free = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
     if plane_splits is None:
         plane_splits = precompute_plane_splits(ray_angle_interp_x, ray_angle_interp_y,
                                                lens_model_fixed, kwargs_lens_fixed,
                                                redshift_planes, cosmo_bkg, R_max, z_source)
     z_prev = 0.0
     for sp in plane_splits:
-        zi = sp['zi'];
+        zi = sp['zi']
         T_z = sp['T_z']
-        x_center = sp['x_center'];
+        x_center = sp['x_center']
         y_center = sp['y_center']
         # step from the previous plane to this one (comoving)
         x_co = x_co + alpha_x * sp['delta_T']
         y_co = y_co + alpha_y * sp['delta_T']
+        if x_co_lin is not None:
+            x_co_lin = x_co_lin + alpha_x_lin * sp['delta_T']
+            y_co_lin = y_co_lin + alpha_y_lin * sp['delta_T']
 
-        # per-plane distortion deflection (REDUCED) from the cached near/far split
-        d_ax, d_ay = distortion_field_at_lens_plane(
-            x_co, y_co, x_center, y_center, T_z,
-            sp['lm_exact'], sp['lm_far'], sp['kw_exact'], sp['kw_far'],
-            kappa_near=sp['kappa_near'])
+        x_sample, y_sample = ((x_co, y_co) if x_co_lin is None
+                              else (x_co_lin, y_co_lin))
+        dalpha_halo_x, dalpha_halo_y = distortion_field_at_lens_plane(
+            x_sample, y_sample, x_center, y_center, T_z,
+            sp['lm_exact'], sp['lm_far'], sp['kw_exact'], sp['kw_far'])
 
-        # fixed-halo distortion: reduced -> physical for this plane, then subtract
-        alpha_x = alpha_x - d_ax * sp['factor']
-        alpha_y = alpha_y - d_ay * sp['factor']
+        alpha_x = alpha_x - dalpha_halo_x * sp['factor']
+        alpha_y = alpha_y - dalpha_halo_y * sp['factor']
+        if x_co_lin is not None:
+            alpha_x_lin = alpha_x_lin - dalpha_halo_x * sp['factor']
+            alpha_y_lin = alpha_y_lin - dalpha_halo_y * sp['factor']
 
-        # main (free/macro) deflector at the split plane -- applied as a differential
-        # (relative to the central ray) with the free model's own reduced->physical
-        # factor (defined w.r.t. the true source, as in coordinates_and_deflections)
         if np.isclose(zi, z_split):
-            theta_gx = x_center + x_co / T_z  # grid ray's absolute angle
-            theta_gy = y_center + y_co / T_z
-            amx_g, amy_g = lens_model_free.alpha(theta_gx, theta_gy, kwargs_lens_free)
-            amx_c, amy_c = lens_model_free.alpha(x_center, y_center, kwargs_lens_free)
-            factor_free = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
-            alpha_x = alpha_x - (amx_g - amx_c) * factor_free
-            alpha_y = alpha_y - (amy_g - amy_c) * factor_free
+            theta_ray_x = x_center + x_co / T_z  # grid ray's absolute angle
+            theta_ray_y = y_center + y_co / T_z
+            alpha_macro_ray_x, alpha_macro_ray_y = lens_model_free.alpha(
+                theta_ray_x, theta_ray_y, kwargs_macro)
+            alpha_macro_ctr_x, alpha_macro_ctr_y = lens_model_free.alpha(
+                x_center, y_center, kwargs_macro)
+            if freeze_background:
+                alpha_lin_ray_x, alpha_lin_ray_y = lens_model_free.alpha(
+                    theta_ray_x, theta_ray_y, kwargs_macro_lin)
+                alpha_lin_ctr_x, alpha_lin_ctr_y = lens_model_free.alpha(
+                    x_center, y_center, kwargs_macro_lin)
+                x_co_lin = np.array(x_co, dtype=float)
+                y_co_lin = np.array(y_co, dtype=float)
+                # NOTE: computed from alpha_x BEFORE the converged macro is applied below
+                alpha_x_lin = alpha_x - (alpha_lin_ray_x - alpha_lin_ctr_x) * factor_free
+                alpha_y_lin = alpha_y - (alpha_lin_ray_y - alpha_lin_ctr_y) * factor_free
+            alpha_x = alpha_x - (alpha_macro_ray_x - alpha_macro_ctr_x) * factor_free
+            alpha_y = alpha_y - (alpha_macro_ray_y - alpha_macro_ctr_y) * factor_free
         z_prev = zi
 
-    # propagate to the source plane. x_co,y_co are DEVIATION comoving, so this is the
-    # DEVIATION source position; the caller adds beta_center for the absolute beta.
     T_s = cosmo_bkg.T_xy(0, z_source)
     delta_T = cosmo_bkg.T_xy(z_prev, z_source)
     x_co = x_co + alpha_x * delta_T
@@ -321,11 +406,6 @@ def accumulate_distortions(ray_angle_interp_x, ray_angle_interp_y,
     dbeta_x = x_co / T_s
     dbeta_y = y_co / T_s
     return dbeta_x, dbeta_y
-
-
-# ---------------------------------------------------------------------------
-# central-ray setup + annulus wrapper (drop into mag_finite_single_image)
-# ---------------------------------------------------------------------------
 
 def _all_halos_at_z(z, lens_model_fixed, kwargs_lens_fixed, exclude_names=()):
     """Build a single-plane LensModel of ALL (non-excluded) fixed halos at redshift z.
@@ -404,9 +484,9 @@ def setup_central_ray(x_image, y_image, lens_model_full, kwargs_lens_full,
 def distortion_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
                                       grid_x_large, grid_y_large,
                                       lens_model_fixed, lens_model_free,
-                                      kwargs_lens_fixed, kwargs_lens_free,
+                                      kwargs_lens_fixed, kwargs_macro,
                                       z_split, z_source, cosmo_bkg, R_max, central_ray,
-                                      inds_selector, verbose=False):
+                                      inds_selector, kwargs_macro_lin=None, verbose=False):
     """Distortion-field analogue of decoupled_multiplane_rayshooting: ray-trace only the
     NEW annulus points [r_min, r_max) and return their source-plane positions. Drops into
     mag_finite_single_image_distortion's growing-region while-loop.
@@ -420,7 +500,7 @@ def distortion_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
     :param lens_model_fixed: multiplane LensModel of the fixed (halo) deflectors
     :param lens_model_free: single-plane LensModel of the free/macro deflector at z_split
     :param kwargs_lens_fixed: kwargs for lens_model_fixed
-    :param kwargs_lens_free: kwargs for lens_model_free (the macro model)
+    :param kwargs_macro: kwargs for lens_model_free -- the CONVERGED macromodel
     :param z_split: redshift of the free/macro deflector
     :param z_source: source redshift
     :param cosmo_bkg: lenstronomy Background
@@ -428,6 +508,8 @@ def distortion_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
     :param central_ray: central-ray dict from central_ray_from_interp / setup_central_ray
         (done once per image)
     :param inds_selector: the annulus point-selection function (e.g. _inds_compute_grid)
+    :param kwargs_macro_lin: the aligned macromodel the decoupled Delta-beta was linearized
+        at; see accumulate_distortions, if None will use the provided kwargs_solution
     :return: (beta_x_new, beta_y_new, inds_new, inds_outside_r) -- source-plane positions
         of the newly added annulus points, their grid indices, and the indices beyond r_max
     """
@@ -435,9 +517,10 @@ def distortion_multiplane_rayshooting(grid_r, r_min, r_max, inds_compute,
     ox = grid_x_large[inds_new]; oy = grid_y_large[inds_new]     # angular offsets from the image
     dbeta_x, dbeta_y = accumulate_distortions(
         central_ray['ray_angle_interp_x'], central_ray['ray_angle_interp_y'],
-        lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+        lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_macro,
         central_ray['redshift_planes'], ox, oy, cosmo_bkg, z_source,
-        z_split, R_max, plane_splits=central_ray.get('plane_splits'), verbose=verbose)
+        z_split, R_max, plane_splits=central_ray.get('plane_splits'),
+        kwargs_macro_lin=kwargs_macro_lin, verbose=verbose)
     bx0, by0 = central_ray['beta_center']
     return bx0 + dbeta_x, by0 + dbeta_y, inds_new, inds_outside_r
 
@@ -460,7 +543,8 @@ def mag_finite_single_image_distortion_adaptive_from_splits(
         rotation_angle=None, hessian_eigenvalue=None,
         lens_model_fixed_batched=None,
         kwargs_lens_fixed_batched=None,
-        grid_shift=(0.0, 0.0)
+        grid_shift=(0.0, 0.0),
+        freeze_background=False
 ):
     """Adaptive-tiling near/far magnification of a single image, given an ALREADY-BUILT
     near/far split (`plane_splits`, from precompute_plane_splits). This is the flux-integration
@@ -489,6 +573,13 @@ def mag_finite_single_image_distortion_adaptive_from_splits(
     """
     beta_center = (kwargs_source[0]['center_x'], kwargs_source[0]['center_y'])
 
+    if freeze_background:
+        # force ray bundle to match that of initial macromodel guess
+        kwargs_macro_lin = kwargs_lens_free
+    else:
+        # allow ray bundle to match that of kwargs_solution
+        kwargs_macro_lin = None
+
     def ray_shoot(thx, thy):
         ox = np.atleast_1d(thx) - x_image + grid_shift[0]
         oy = np.atleast_1d(thy) - y_image + grid_shift[1]
@@ -497,7 +588,7 @@ def mag_finite_single_image_distortion_adaptive_from_splits(
         dbeta_x, dbeta_y = accumulate_distortions(
             None, None, lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens,
             None, ox, oy, cosmo_bkg, z_source, z_split, None,
-            plane_splits=plane_splits)
+            plane_splits=plane_splits, kwargs_macro_lin=kwargs_macro_lin)
         return beta_center[0] + dbeta_x, beta_center[1] + dbeta_y
 
     def source_sb(bx, by):
@@ -548,7 +639,8 @@ def mag_finite_single_image_distortion_adaptive(
         kwargs_lens_free, n_coarse=20, rel_tol=1e-3, flux_floor_frac=1e-3,
         rotation_angle=None, hessian_eigenvalue=None,
         lens_model_fixed_batched=None,
-        kwargs_lens_fixed_batched=None
+        kwargs_lens_fixed_batched=None,
+        freeze_background=False
 ):
     """Adaptive-tiling version of mag_finite_single_image_distortion. Thin wrapper: builds the
     near/far split (precompute_plane_splits) fresh, then delegates the actual flux integration
@@ -574,7 +666,8 @@ def mag_finite_single_image_distortion_adaptive(
         n_coarse=n_coarse, rel_tol=rel_tol, flux_floor_frac=flux_floor_frac,
         rotation_angle=rotation_angle, hessian_eigenvalue=hessian_eigenvalue,
         lens_model_fixed_batched=lens_model_fixed_batched,
-        kwargs_lens_fixed_batched=kwargs_lens_fixed_batched)
+        kwargs_lens_fixed_batched=kwargs_lens_fixed_batched,
+        freeze_background=freeze_background)
 
 
 def mag_finite_single_image_distortion(
@@ -585,6 +678,7 @@ def mag_finite_single_image_distortion(
         R_max, ray_interp_x, ray_interp_y, x_image, y_image, kwargs_lens_free,
         lens_model_fixed_batched=None,
         kwargs_lens_fixed_batched=None,
+        freeze_background=False,
         verbose=False):
     """Finite-source magnification of a single image via the near/far distortion field
 
@@ -635,12 +729,19 @@ def mag_finite_single_image_distortion(
     central_ray['plane_splits'] = precompute_plane_splits(
         rix, riy, lens_model_fixed, kwargs_lens_fixed, redshift_planes, cosmo_bkg, R_max, z_source)
 
+    if freeze_background:
+        # force ray bundle to match that of initial macromodel guess
+        kwargs_macro_lin = kwargs_lens_free
+    else:
+        # allow ray bundle to match that of kwargs_solution
+        kwargs_macro_lin = None
     while True:
         beta_x_new, beta_y_new, inds_new, _ = distortion_multiplane_rayshooting(
             grid_r, r_min, r_max, inds_compute,
             grid_x_large, grid_y_large,
             lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens,
-            z_split, z_source, cosmo_bkg, R_max, central_ray, _inds_compute_grid, verbose=verbose)
+            z_split, z_source, cosmo_bkg, R_max, central_ray, _inds_compute_grid,
+            kwargs_macro_lin=kwargs_macro_lin, verbose=verbose)
         sb_new = source_model.surface_brightness(beta_x_new, beta_y_new, kwargs_source)
         flux_array[inds_new] = sb_new
         beta_x_grid[inds_new] = beta_x_new
