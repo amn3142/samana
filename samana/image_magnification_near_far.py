@@ -569,8 +569,14 @@ def mag_finite_single_image_distortion_adaptive_from_splits(
         exact point-source magnification used for the mu_discrepancy check below, so the two
         are compared at the same (possibly shifted) image-plane location.
     :return: (magnification, flux_array, tiling, mu_discrepancy) -- see
-        mag_finite_single_image_distortion_adaptive.
+        mag_finite_single_image_distortion_adaptive. tiling['beta_discrepancy'] is a prototype
+        diagnostic (offset between beta_center and the true exact beta at this image's position,
+        in source-sigma units, nan if kwargs_source has no 'sigma' key) -- see the inline comment
+        above its computation.
     """
+    lm_exact = lens_model_fixed_batched if lens_model_fixed_batched is not None else lens_model_fixed
+    kw_exact = kwargs_lens_fixed_batched if kwargs_lens_fixed_batched is not None else kwargs_lens_fixed
+
     beta_center = (kwargs_source[0]['center_x'], kwargs_source[0]['center_y'])
 
     if freeze_background:
@@ -604,13 +610,6 @@ def mag_finite_single_image_distortion_adaptive_from_splits(
     flux_array = rasterize_leaves(leaves, grid_size_max, npix)
     lcx, lcy, lh, lsb = leaves  # square-quadtree leaves: centers, half-size, SB
 
-    tiling = {'shape': 'square', 'cx': lcx, 'cy': lcy, 'half': lh, 'sb': lsb,
-              'box_size': grid_size_max, 'npix': npix, 'grid_resolution': grid_resolution,
-              'rotation_angle': rotation_angle, 'hessian_eigenvalue': hessian_eigenvalue,
-              'n_calls': n_calls, 'n_points': n_pts}
-
-    lm_exact = lens_model_fixed_batched if lens_model_fixed_batched is not None else lens_model_fixed
-    kw_exact = kwargs_lens_fixed_batched if kwargs_lens_fixed_batched is not None else kwargs_lens_fixed
     mu_point = exact_point_source_magnification(
         lm_exact, lens_model_free, kw_exact, kwargs_lens_free, kwargs_lens,
         z_split, z_source, cosmo_bkg, x_image + grid_shift[0], y_image + grid_shift[1],
@@ -628,6 +627,44 @@ def mag_finite_single_image_distortion_adaptive_from_splits(
     mu_point_nearfar = 1.0 / abs(det) if det != 0 else np.inf
     mu_discrepancy = (abs(mu_point_nearfar - mu_point) / mu_point
                       if mu_point > 0 and np.isfinite(mu_point_nearfar) else np.inf)
+
+    # beta_discrepancy (PROTOTYPE, not yet wired into any fallback decision): how far near/far's
+    # central-ray anchor (beta_center) sits from the TRUE exact beta at this image's own position,
+    # in units of the source's own sigma. Complements mu_discrepancy (a JACOBIAN/derivative-only
+    # check): the magnification can stay locally smooth and near/far-consistent (mu_discrepancy
+    # small) even while the absolute source-plane position near/far assumes has drifted many
+    # source-sigma from the truth -- invisible to mu_discrepancy, but catastrophic for a compact
+    # source's finite-aperture flux integral (near-zero true flux gets reported as near/far's
+    # locally-plausible-looking magnification). Found via seed 50396, WFI2026: mu_discrepancy=0.03
+    # (well under the 0.05 tolerance) while the finite-source magnification was wrong by 10 orders
+    # of magnitude, traced to a 23.75-sigma beta offset. See near_far_accuracy_investigation_notes.md
+    # and debug_seed50396_image2_outlier.py. Stashed in `tiling` (not a new return value) so this
+    # stays a non-breaking addition for the many existing 4-tuple-unpacking callers.
+    #
+    # Deliberately passes kwargs_lens (kwargs_solution) for BOTH of exact_point_source_beta's
+    # macro-deflector arguments -- NOT kwargs_lens_free (this function's own parameter, the
+    # decoupled-setup's stale initial guess, correctly used elsewhere in this function for the
+    # central-ray/ray_interp setup, and also what mu_point above uses for the same "coupling
+    # estimate" slot). Using kwargs_lens_free here was tried first and made this check USELESS:
+    # it reproduced the same bug documented in exact_point_source_beta's docstring / the
+    # near-far-central-ray-bug memory's "Caution" note, collapsing the true 23.75-sigma offset
+    # for seed 50396 down to 0.0009 -- i.e. exactly the kind of stale-macromodel mistake this
+    # diagnostic exists to catch. mu_point's own use of kwargs_lens_free for this slot may be
+    # worth revisiting for the same reason, but that's outside this prototype's scope.
+    bx_exact_center, by_exact_center = exact_point_source_beta(
+        lm_exact, lens_model_free, kw_exact, kwargs_lens, kwargs_lens,
+        z_split, z_source, cosmo_bkg, x_image + grid_shift[0], y_image + grid_shift[1])
+    source_sigma = kwargs_source[0].get('sigma', None)
+    if source_sigma:
+        beta_discrepancy = float(np.hypot(beta_center[0] - bx_exact_center[0],
+                                          beta_center[1] - by_exact_center[0]) / source_sigma)
+    else:
+        beta_discrepancy = np.nan
+
+    tiling = {'shape': 'square', 'cx': lcx, 'cy': lcy, 'half': lh, 'sb': lsb,
+              'box_size': grid_size_max, 'npix': npix, 'grid_resolution': grid_resolution,
+              'rotation_angle': rotation_angle, 'hessian_eigenvalue': hessian_eigenvalue,
+              'n_calls': n_calls, 'n_points': n_pts, 'beta_discrepancy': beta_discrepancy}
 
     return mag, flux_array, tiling, mu_discrepancy
 
@@ -715,6 +752,9 @@ def mag_finite_single_image_distortion(
     if not any(np.isclose(z, z_split) for z in redshift_planes):
         redshift_planes = sorted(redshift_planes + [float(z_split)])
 
+    lm_exact = lens_model_fixed_batched if lens_model_fixed_batched is not None else lens_model_fixed
+    kw_exact = kwargs_lens_fixed_batched if kwargs_lens_fixed_batched is not None else kwargs_lens_fixed
+
     beta_center = (kwargs_source[0]['center_x'], kwargs_source[0]['center_y'])
     central_ray = central_ray_from_interp(rix, riy, beta_center, redshift_planes, z_source)
 
@@ -759,13 +799,95 @@ def mag_finite_single_image_distortion(
         else:
             magnification_last = magnification_temp
 
-    lm_exact = lens_model_fixed_batched if lens_model_fixed_batched is not None else lens_model_fixed
-    kw_exact = kwargs_lens_fixed_batched if kwargs_lens_fixed_batched is not None else kwargs_lens_fixed
     mu_point = exact_point_source_magnification(
         lm_exact, lens_model_free, kw_exact, kwargs_lens_free, kwargs_lens,
         z_split, z_source, cosmo_bkg, x_image, y_image, eps=grid_resolution)
     mu_discrepancy = abs(magnification_temp - mu_point) / mu_point if mu_point > 0 else np.inf
-    return magnification_temp, flux_array, mu_discrepancy
+
+    # beta_discrepancy -- see the identical, more-detailed comment in
+    # mag_finite_single_image_distortion_adaptive_from_splits, including why this deliberately
+    # passes kwargs_lens (not kwargs_lens_free) for BOTH macro-deflector arguments.
+    bx_exact_center, by_exact_center = exact_point_source_beta(
+        lm_exact, lens_model_free, kw_exact, kwargs_lens, kwargs_lens,
+        z_split, z_source, cosmo_bkg, x_image, y_image)
+    source_sigma = kwargs_source[0].get('sigma', None)
+    if source_sigma:
+        beta_discrepancy = float(np.hypot(beta_center[0] - bx_exact_center[0],
+                                          beta_center[1] - by_exact_center[0]) / source_sigma)
+    else:
+        beta_discrepancy = np.nan
+
+    return magnification_temp, flux_array, mu_discrepancy, beta_discrepancy
+
+def exact_point_source_beta(lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+                            kwargs_lens_free, kwargs_lens, z_split, z_source,
+                            cosmo_bkg, x, y):
+    """Exact decoupled-multiplane source-plane position(s) beta(x, y), via the same
+    production 'exact' path (coordinates_and_deflections + calc_source_sb) used by
+    exact_point_source_magnification below. x, y may be scalars or arrays; kwargs_lens
+    must be the actual solved macromodel (not a pre-optimization guess -- see
+    near_far_accuracy_investigation_notes.md, Part 1).
+
+    :return: (beta_x, beta_y) arrays, same shape as x, y
+    """
+    from lenstronomy.LensModel.Util.decouple_multi_plane_util import coordinates_and_deflections
+    from samana.image_magnification_util import calc_source_sb
+    Td = cosmo_bkg.T_xy(0, z_split); Ts = cosmo_bkg.T_xy(0, z_source)
+    Tds = cosmo_bkg.T_xy(z_split, z_source)
+    reduced_to_phys = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
+    tx = np.atleast_1d(x); ty = np.atleast_1d(y)
+    xD, yD, afx, afy, abx, aby = coordinates_and_deflections(
+        lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
+        tx, ty, z_split, z_source, cosmo_bkg)
+    return calc_source_sb(xD, yD, afx, afy, abx, aby, Td, Tds, Ts,
+                          reduced_to_phys, lens_model_free, kwargs_lens)
+
+
+def source_position_convergence_check(lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+                                      kwargs_lens_free, kwargs_lens, z_split, z_source,
+                                      cosmo_bkg, x_image, y_image, source_sigma,
+                                      threshold=0.05, verbose=False):
+    """Standalone diagnostic (NOT called from the production near/far path) for whether
+    anchoring the central ray to kwargs_source's shared average center -- what
+    mag_finite_single_image_distortion(_adaptive_from_splits) actually do -- is a safe
+    approximation for a source of size source_sigma, for a given solved macromodel.
+
+    Ray-traces each image's OWN exact source-plane position via exact_point_source_beta (the
+    same production 'exact' path used elsewhere), then looks at how far apart those per-image
+    solutions land from EACH OTHER -- the spread -- not any one image's offset from their
+    average. For a well-converged macromodel the images agree to ~1e-7 arcsec; when the
+    optimizer's internal convergence check reports "converged" without matching true
+    (non-linearized) physics, they can disagree by ~1e-4 arcsec or more. A synthetic-offset
+    sweep found this starts to matter once the spread is a non-negligible fraction of the
+    source's own sigma: negligible below ~0.01 sigma (quadtree noise floor), >1% flux error by
+    ~0.1 sigma, ~8% by 0.5 sigma. See near_far_accuracy_investigation_notes.md (repo root,
+    Parts 2-3) for the full investigation, including a broader 80-seed sweep with real (not
+    injected) macromodel scatter.
+
+    :param x_image, y_image: image positions (arcsec), one per image
+    :param source_sigma: the source's Gaussian sigma (arcsec), e.g. kwargs_source[0]['sigma']
+    :param threshold: spread/sigma ratio above which convergence is flagged as a real risk to
+        near/far's average-anchoring approximation (~0.05-0.1 per the investigation)
+    :return: dict with 'beta_x'/'beta_y' (each image's own exact source position), 'spread'
+        (max pairwise distance among them, arcsec), 'ratio' (spread / source_sigma), and
+        'flagged' (bool)
+    """
+    bx, by = exact_point_source_beta(lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+                                     kwargs_lens_free, kwargs_lens, z_split, z_source,
+                                     cosmo_bkg, np.asarray(x_image), np.asarray(y_image))
+    spread = 0.0
+    for i in range(len(bx)):
+        for j in range(i + 1, len(bx)):
+            spread = max(spread, float(np.hypot(bx[i] - bx[j], by[i] - by[j])))
+    ratio = spread / source_sigma
+    flagged = ratio > threshold
+    if verbose:
+        print('source position spread across images: {:.3e} arcsec ({:.4f} x source sigma) '
+             '-- {} (threshold {})'.format(
+                 spread, ratio, 'FLAGGED' if flagged else 'ok', threshold))
+    return {'beta_x': bx, 'beta_y': by, 'spread': spread, 'ratio': ratio,
+           'flagged': flagged, 'threshold': threshold}
+
 
 def exact_point_source_magnification(lens_model_fixed, lens_model_free, kwargs_lens_fixed,
                                      kwargs_lens_free, kwargs_lens, z_split, z_source,
@@ -775,18 +897,11 @@ def exact_point_source_magnification(lens_model_fixed, lens_model_free, kwargs_l
     For a small source away from a caustic the finite-source magnification equals this, so a
     large near/far-vs-this discrepancy flags a near/far failure (over- OR under-production)
     that the geometry-based fold metric misses."""
-    from lenstronomy.LensModel.Util.decouple_multi_plane_util import coordinates_and_deflections
-    from samana.image_magnification_util import calc_source_sb
-    Td = cosmo_bkg.T_xy(0, z_split); Ts = cosmo_bkg.T_xy(0, z_source)
-    Tds = cosmo_bkg.T_xy(z_split, z_source)
-    reduced_to_phys = cosmo_bkg.d_xy(0, z_source) / cosmo_bkg.d_xy(z_split, z_source)
     tx = np.array([x_image + eps, x_image - eps, x_image, x_image])
     ty = np.array([y_image, y_image, y_image + eps, y_image - eps])
-    xD, yD, afx, afy, abx, aby = coordinates_and_deflections(
-        lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
-        tx, ty, z_split, z_source, cosmo_bkg)
-    bx, by = calc_source_sb(xD, yD, afx, afy, abx, aby, Td, Tds, Ts,
-                            reduced_to_phys, lens_model_free, kwargs_lens)
+    bx, by = exact_point_source_beta(lens_model_fixed, lens_model_free, kwargs_lens_fixed,
+                                     kwargs_lens_free, kwargs_lens, z_split, z_source,
+                                     cosmo_bkg, tx, ty)
     Axx = (bx[0] - bx[1]) / (2 * eps); Ayx = (by[0] - by[1]) / (2 * eps)
     Axy = (bx[2] - bx[3]) / (2 * eps); Ayy = (by[2] - by[3]) / (2 * eps)
     det = Axx * Ayy - Axy * Ayx

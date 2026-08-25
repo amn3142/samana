@@ -272,6 +272,15 @@ def run_source2_pso(data_class, astropy_cosmo,
     source_y = float(np.mean(source_y))
     kpc_per_arcsec = 1.0 / astropy_cosmo.arcsec_per_kpc_proper(z_source).value
 
+    # kwargs_lens_init_batch's macro-deflector entries are the pre-optimization alignment guess
+    # (kwargs_lens_align, set in forward_model_new.py), not kwargs_solution -- left as-is here to
+    # match main's production convention: forward_model_new.py:587 sets this deliberately, and
+    # image_magnification_util.py::magnification_finite_decoupled (main) passes kwargs_lens_batch
+    # straight into interpolate_ray_paths unmodified for the single-source NEAR_FAR_SPLITTING
+    # path. An earlier version of this function swapped in kwargs_solution here (see
+    # near_far_accuracy_investigation_notes.md, repo root) -- that swap was never adopted on main
+    # and has been reverted for consistency.
+
     def compute_mags2(offset_x, offset_y, size_pc_2, return_images=False, n_coarse_override=None):
         # Two independent rejection filters, both checked before any magnification call (same
         # cheap-check-before-expensive-work pattern old/optimize_source.py uses for its FWHM

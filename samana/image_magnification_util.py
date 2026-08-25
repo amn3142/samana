@@ -68,6 +68,15 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
         lens_model_fixed_batch = lens_model_fixed
         kwargs_lens_fixed_batch = kwargs_lens_fixed
 
+    # kwargs_lens_batch's macro-deflector entries (used below for the NEAR_FAR_SPLITTING*
+    # methods' central-ray interpolation) are the pre-optimization alignment guess, not
+    # kwargs_lens -- left as-is here to match main's production convention: forward_model_new.py
+    # deliberately sets kwargs_lens_init_batch this way, and this function passes kwargs_lens_batch
+    # straight into interpolate_ray_paths unmodified on main. An earlier version of this function
+    # swapped in kwargs_lens here (see near_far_accuracy_investigation_notes.md, repo root) -- that
+    # swap was never adopted on main and has been reverted for consistency (same revert already
+    # applied in source2_position_pso.py::run_source2_pso).
+
     magnifications = []
     flux_arrays = []
     # one entry per image; NaN for methods that do not compute a point-source cross check
@@ -142,7 +151,16 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
                                                                )
             tiling = None
             if magnification_method == 'NEAR_FAR_SPLITTING':
-                mag, flux_array, mu_discrepancy = mag_finite_single_image_distortion(
+                # beta_discrepancy (mag_finite_single_image_distortion's new 4th return value,
+                # a PROTOTYPE diagnostic -- see near_far_central_ray_bug memory /
+                # debug_seed50396_image2_outlier.py) is discarded here for now: this branch's
+                # `tiling` must stay None (not a dict) since downstream code (flux_arrays.append
+                # below) uses `tiling is not None` to decide whether to reshape flux_array for
+                # plotting vs keep it as a [flux_array, tiling] pair, and changing that here would
+                # silently change the NEAR_FAR_SPLITTING (non-adaptive) output shape for every
+                # existing caller. Wired up for the ADAPTIVE branch instead (via its tiling dict,
+                # which already carries this shape either way).
+                mag, flux_array, mu_discrepancy, _ = mag_finite_single_image_distortion(
                     source_model, kwargs_source, lens_model_fixed, lens_model_free, kwargs_lens_fixed,
                     kwargs_lens, z_split, z_source,
                     cosmo_bkg, grid_x_large, grid_y_large,
@@ -171,7 +189,10 @@ def magnification_finite_decoupled(source_model, kwargs_source, x_image, y_image
                     freeze_background=freeze_background,
                     **kwargs_adaptive_tiling
                 )
-            if verbose: print('point-source mag discrepancy: ', mu_discrepancy)
+            if verbose:
+                print('point-source mag discrepancy: ', mu_discrepancy)
+                if tiling is not None and 'beta_discrepancy' in tiling:
+                    print('beta discrepancy (prototype, source-sigma units): ', tiling['beta_discrepancy'])
             # FLAGS IMAGES WHERE APPROXIMATION BREAKS DOWN
             if mu_discrepancy > MU_TOLERANCE:
                 if verbose:

@@ -439,6 +439,66 @@ class Output(object):
             self._flux_ratios = self.image_magnifications[:, 1:] / self.image_magnifications[:, 0, np.newaxis]
         return self._flux_ratios
 
+    def source_plane_scatter_arcsec(self, tolerance=0.0001):
+        """Physical arcsec scatter across each image's source-plane position under the solved
+        macromodel, recovered directly from the already-stored 'source_plane_sol' column
+        (forward_model_util.check_lens_equation_solution's output, computed once per
+        realization during the forward model itself -- no re-solving needed here).
+        check_lens_equation_solution returns sqrt(penalty)/tolerance/num_images with
+        num_images=4 hardcoded for quad lenses; this undoes that normalization to recover
+        sqrt(penalty) itself, in arcsec.
+
+        :param tolerance: MUST match the `tolerance` (samana >= 6ae2958: the
+            `tolerance_lens_equation_solution` argument to forward_model/
+            forward_model_single_iteration, default 1e-4) that was actually in effect when
+            'source_plane_sol' was computed for this run -- it's baked into that column's
+            normalization and there is no way to recover it from the output file itself.
+            Defaults to 0.0001, the value hardcoded (and the only value possible) before
+            samana 6ae2958 made it configurable; pass the actual value used for runs after
+            that if it was overridden from the default.
+        """
+        cache_key = '_source_plane_scatter_arcsec_%r' % (tolerance,)
+        if not hasattr(self, cache_key):
+            setattr(self, cache_key, self.param_dict['source_plane_sol'] * tolerance * 4)
+        return getattr(self, cache_key)
+
+    def source_plane_scatter_ratio(self, source_size_pc_key='source_size_pc_1', z_source=None,
+                                   kpc_per_arcsec=None, threshold=0.05, tolerance=0.0001,
+                                   verbose=False):
+        """Flags realizations where the macromodel's own images disagree on the source
+        position by enough, relative to the source's size, that near/far's average-anchored
+        beta_center (kwargs_source[0]['center_x'/'center_y'], see image_magnification_near_far
+        .mag_finite_single_image_distortion(_adaptive_from_splits)) is a risky approximation.
+        Pure post-processing arithmetic on already-stored columns (source_plane_scatter_arcsec
+        above), not a re-derivation -- no macromodel re-solving involved.
+
+        :param source_size_pc_key: parameters column holding the source's FWHM (pc) to judge
+            the scatter against -- 'source_size_pc_1' for dual-source runs (the small source
+            the macromodel solve is directly anchored to), 'source_size_pc' for single-source
+            runs.
+        :param z_source, kpc_per_arcsec: supply one to convert pc -> arcsec, same convention as
+            image_magnification_util.setup_gaussian_source (kpc_per_arcsec takes precedence).
+        :param threshold: scatter/sigma ratio above which a realization is flagged (~0.05-0.1
+            per near_far_accuracy_investigation_notes.md's synthetic-offset sweep: negligible
+            below ~0.01, >1% flux error by ~0.1, ~8% by 0.5)
+        :param tolerance: see source_plane_scatter_arcsec -- must match what the run actually
+            used to compute 'source_plane_sol'.
+        :return: (ratio, flagged) -- arrays, one entry per kept realization
+        """
+        if kpc_per_arcsec is None:
+            if z_source is None:
+                raise ValueError('must supply either z_source or kpc_per_arcsec')
+            from lenstronomy.Cosmo.background import Background
+            kpc_per_arcsec = 1.0 / Background().cosmo.arcsec_per_kpc_proper(z_source).value
+        fwhm_pc = self.param_dict[source_size_pc_key]
+        sigma_arcsec = 1e-3 * fwhm_pc / 2.354820 / kpc_per_arcsec
+        ratio = self.source_plane_scatter_arcsec(tolerance=tolerance) / sigma_arcsec
+        flagged = ratio > threshold
+        if verbose:
+            print('source plane scatter / source sigma: flagged {}/{} realizations (threshold {})'.format(
+                int(np.sum(flagged)), len(flagged), threshold))
+        return ratio, flagged
+
     def parameter_array(self, param_names):
 
         samples = np.empty((self.parameters.shape[0], len(param_names)))

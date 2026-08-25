@@ -500,6 +500,33 @@ def check_lens_equation_solution(source_x, source_y, tolerance=0.0001):
         raise Exception('check solution only implemented for 2 and 4 images')
     return np.sqrt(penalty) / tolerance / num_images
 
+def source_plane_scatter_ratio(source_x, source_y, source_sigma_arcsec):
+    """Ratio of the source-plane scatter across images (the same sqrt(penalty) pairwise-distance
+    metric check_lens_equation_solution uses, but normalized by the source's own size instead of
+    an arbitrary fixed tolerance) to the source's sigma.
+
+    near/far's finite-aperture magnification (image_magnification_near_far.py,
+    mag_finite_single_image_distortion(_adaptive_from_splits)) anchors its central ray to
+    kwargs_source[0]['center_x'/'center_y'] -- the AVERAGE of these per-image source positions.
+    That's a deliberate approximation of the method (exactness would mean ray-tracing each
+    image's own position, defeating the speed near/far exists for), and it's a good one when the
+    images agree closely -- but the approximation's error grows with how much they disagree,
+    relative to the source's own size. See near_far_accuracy_investigation_notes.md (repo root,
+    samana_gputests) for the investigation that established this: negligible below ratio~0.01,
+    >1% flux error by ~0.1, ~8% by ~0.5.
+
+    :param source_x, source_y: each image's own source-plane position (arcsec), e.g. from
+        lens_model.ray_shooting(x_image, y_image, kwargs_solution)
+    :param source_sigma_arcsec: the source's Gaussian sigma (arcsec)
+    :return: scatter / source_sigma_arcsec
+    """
+    num_images = len(source_x)
+    penalty = 0.0
+    for i in range(num_images):
+        for j in range(i + 1, num_images):
+            penalty += (source_x[i] - source_x[j]) ** 2 + (source_y[i] - source_y[j]) ** 2
+    return np.sqrt(penalty) / source_sigma_arcsec
+
 def macromodel_readout_function_0435(kwargs_solution, samples_fixed_dict):
 
     epl_main = kwargs_solution[0]
