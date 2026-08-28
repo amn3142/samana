@@ -429,8 +429,7 @@ class PSODoubleGaussianMagnification(object):
         # even on iterations where this class's __call__ never runs (see
         # split_image_data_reconstruction's magnification-skip branch)
         self.last_fit_param_names = ['source_x_offset_2', 'source_y_offset_2',
-                                     'source_size_pc_2', 'source2_pso_chi2', 'source1_chisq',
-                                     'source1_logL']
+                                     'source_size_pc_2', 'source2_pso_chi2', 'source1_chisq']
         self.last_fit = None
 
     def __call__(self, source_dict, source_x, source_y, data_class, model_class,
@@ -453,18 +452,15 @@ class PSODoubleGaussianMagnification(object):
             setup_decoupled_multiplane_lens_model_output_batch=setup_decoupled_multiplane_lens_model_output_batch,
             verbose=verbose)
 
-        # always computed (not just when the skip-threshold gate is active) so it's recorded as a
-        # column in every run's output for debugging/inspection -- see last_fit_param_names above.
-        idx = np.asarray(data_class.keep_flux_ratio_index)
-        cov1 = np.asarray(data_class.flux_ratio_covariance_matrix)[np.ix_(idx, idx)]
-        fr1_model = np.asarray(flux_ratios_1)
-        fr1_data = np.asarray(flux_ratios_data)
-        source1_logL = (multivariate_normal.logpdf(fr1_model, mean=fr1_data, cov=cov1)
-                        - multivariate_normal.logpdf(fr1_data, mean=fr1_data, cov=cov1))
-        if verbose:
-            print('source1_logL (relative to perfect match): ', source1_logL)
-
         if self.source1_logL_skip_threshold is not None:
+            idx = np.asarray(data_class.keep_flux_ratio_index)
+            cov1 = np.asarray(data_class.flux_ratio_covariance_matrix)[np.ix_(idx, idx)]
+            fr1_model = np.asarray(flux_ratios_1)
+            fr1_data = np.asarray(flux_ratios_data)
+            source1_logL = (multivariate_normal.logpdf(fr1_model, mean=fr1_data, cov=cov1)
+                            - multivariate_normal.logpdf(fr1_data, mean=fr1_data, cov=cov1))
+            if verbose:
+                print('source1_logL (relative to perfect match): ', source1_logL)
             if source1_logL < self.source1_logL_skip_threshold:
                 # joint_logL = source1_logL + source2_logL, and source2_logL <= 0 always (its own
                 # max, at a perfect match) -- so joint_logL <= source1_logL <
@@ -479,7 +475,7 @@ class PSODoubleGaussianMagnification(object):
                 # still failing any realistic finite acceptance tolerance.
                 self.last_fit = {'source_x_offset_2': np.nan, 'source_y_offset_2': np.nan,
                                  'source_size_pc_2': np.nan, 'source2_pso_chi2': np.nan,
-                                 'source1_chisq': stat_1, 'source1_logL': source1_logL}
+                                 'source1_chisq': stat_1}
                 magnifications = np.append(mags_1, mags_2)
                 images = images_1 + [None] * n_images
                 stat = np.sqrt(stat_1 ** 2 + stat_2 ** 2)
@@ -548,7 +544,7 @@ class PSODoubleGaussianMagnification(object):
                          'source_y_offset_2': fit['source_y_offset_2'],
                          'source_size_pc_2': fit['source_size_pc_2'],
                          'source2_pso_chi2': fit['source2_pso_chi2'],
-                         'source1_chisq': stat_1, 'source1_logL': source1_logL}
+                         'source1_chisq': stat_1}
 
         magnifications = np.append(mags_1, mags_2)
         images = images_1 + (fit['images'] if fit['images'] is not None else [None] * len(mags_2))
