@@ -769,10 +769,12 @@ def forward_model_single_iteration(data_class,
         if len(magnifications) > 4:
             print('magnifications (1): ', magnifications[0:4])
             print('flux ratios model (1): ', magnifications[0:4] / magnifications[0])
-            print('statistic (1): ', stat[0])
             print('magnifications (2): ', magnifications[4:])
             print('flux ratios model (2): ', magnifications[4:] / magnifications[4])
-            print('statistic (2): ', stat[1])
+            # stat is a single combined scalar (np.sqrt(stat_1**2 + stat_2**2)) for dual-source
+            # magnification classes, not a 2-element array -- see PSODoubleGaussianMagnification's
+            # __call__ (base_classes.py) for why it was changed from np.append(stat_1, stat_2).
+            print('statistic (combined): ', stat)
         else:
             print('magnifications: ', magnifications)
             print('flux ratios model: ', magnifications[1:] / magnifications[0])
