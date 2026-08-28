@@ -1,4 +1,5 @@
 from copy import deepcopy
+from scipy.stats import multivariate_normal
 
 from samana.image_magnification_util import setup_gaussian_source
 from samana.forward_model_util import flux_ratio_summary_statistic
@@ -327,7 +328,8 @@ class PSODoubleGaussianMagnification(object):
                  test_mode=False,
                  max_image_plane_shift=0.01,
                  n_coarse=20,
-                 final_n_coarse=40):
+                 final_n_coarse=40,
+                 source1_logL_skip_threshold=None):
         """
 
         :param astropy_cosmo:
@@ -366,6 +368,28 @@ class PSODoubleGaussianMagnification(object):
             outlier risk with a single extra n_coarse=40 evaluation at the winning point (not
             per-particle), so the reported chi2/magnifications are always full-precision even
             though the search itself runs at the cheaper setting.
+        :param source1_logL_skip_threshold: if not None, skip the (expensive) source-2 PSO
+            entirely whenever source-1's own flux-ratio log-likelihood (relative to a perfect
+            match against data_class.magnifications[0:4], i.e. 0 at a perfect match, more
+            negative for a worse fit -- same convention as this session's ABC-selection scripts)
+            falls below this value. Rationale: joint_logL = source1_logL + source2_logL, and
+            source2_logL <= 0 always (its own maximum, at a perfect match) -- so joint_logL <=
+            source1_logL ALWAYS, meaning a realization that fails a source-1-only threshold T can
+            NEVER have a joint logL above T regardless of how well source-2 could fit (verified
+            empirically on RXJ1131 size30_highCC: 997k realizations, 0/948806 realizations with
+            source1_logL <= -100 had joint_logL > -100; the single best joint-logL realization in
+            the whole dataset also had source1_logL > -100). Default None preserves the original
+            behavior (always run the PSO). When skipped: source_x_offset_2/source_y_offset_2/
+            source_size_pc_2/source2_pso_chi2 are recorded as NaN (self.last_fit, same convention
+            already used when this class's __call__ never runs at all -- see last_fit_param_names
+            below), and mags_2/flux_ratios_2 are also NaN -- IMPORTANT: this means
+            Output.clean()/.clean_nans() (which checks ALL flux ratios' finiteness) will drop
+            these realizations; downstream analysis of a dataset using this gate must check only
+            source-1's flux ratios for finiteness (as this session's analysis scripts already do,
+            via image_magnifications directly) rather than calling the generic .clean(). The
+            combined `stat` for a skipped realization uses a large-but-finite stat_2 placeholder
+            (not NaN, not inf) so it stays usable under tolerance=np.inf (mock_inference.py's
+            convention) while still failing any realistic finite acceptance tolerance.
         """
         if magnification_method != 'NEAR_FAR_SPLITTING_ADAPTIVE':
             raise Exception("PSODoubleGaussianMagnification's source-2 PSO path is only "
@@ -388,6 +412,7 @@ class PSODoubleGaussianMagnification(object):
         self.max_image_plane_shift = max_image_plane_shift
         self.n_coarse = n_coarse
         self.final_n_coarse = final_n_coarse
+        self.source1_logL_skip_threshold = source1_logL_skip_threshold
         self._single_source_magnification = SingleGaussianMagnification(astropy_cosmo,
                  rescale_grid_size,
                  rescale_grid_resolution,
@@ -426,6 +451,36 @@ class PSODoubleGaussianMagnification(object):
             halo_masses=halo_masses,
             setup_decoupled_multiplane_lens_model_output_batch=setup_decoupled_multiplane_lens_model_output_batch,
             verbose=verbose)
+
+        if self.source1_logL_skip_threshold is not None:
+            idx = np.asarray(data_class.keep_flux_ratio_index)
+            cov1 = np.asarray(data_class.flux_ratio_covariance_matrix)[np.ix_(idx, idx)]
+            fr1_model = np.asarray(flux_ratios_1)
+            fr1_data = np.asarray(flux_ratios_data)
+            source1_logL = (multivariate_normal.logpdf(fr1_model, mean=fr1_data, cov=cov1)
+                            - multivariate_normal.logpdf(fr1_data, mean=fr1_data, cov=cov1))
+            if verbose:
+                print('source1_logL (relative to perfect match): ', source1_logL)
+            if source1_logL < self.source1_logL_skip_threshold:
+                # joint_logL = source1_logL + source2_logL, and source2_logL <= 0 always (its own
+                # max, at a perfect match) -- so joint_logL <= source1_logL <
+                # source1_logL_skip_threshold here, meaning this realization could never have
+                # passed a joint-likelihood threshold this loose or tighter, regardless of how
+                # well source 2 could fit. Skip the expensive PSO entirely.
+                n_images = len(mags_1)
+                mags_2 = np.full(n_images, np.nan)
+                flux_ratios_2 = np.full(len(flux_ratios_1), np.nan)
+                stat_2 = 1e6  # large-but-finite: keeps combined `stat` finite (so tolerance=np.inf
+                # runs -- e.g. rxj1131_mock_inference.py -- still record this realization) while
+                # still failing any realistic finite acceptance tolerance.
+                self.last_fit = {'source_x_offset_2': np.nan, 'source_y_offset_2': np.nan,
+                                 'source_size_pc_2': np.nan, 'source2_pso_chi2': np.nan,
+                                 'source1_chisq': stat_1}
+                magnifications = np.append(mags_1, mags_2)
+                images = images_1 + [None] * n_images
+                stat = np.sqrt(stat_1 ** 2 + stat_2 ** 2)
+                flux_ratios = np.append(flux_ratios_1, flux_ratios_2)
+                return magnifications, images, stat, flux_ratios, flux_ratios_data
 
         (lens_model_fixed, lens_model_free, kwargs_lens_fixed, kwargs_lens_free,
          z_source, z_split, cosmo_bkg) = setup_decoupled_multiplane_lens_model_output
