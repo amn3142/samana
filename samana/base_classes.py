@@ -467,15 +467,23 @@ class PSODoubleGaussianMagnification(object):
                 # source1_logL_skip_threshold here, meaning this realization could never have
                 # passed a joint-likelihood threshold this loose or tighter, regardless of how
                 # well source 2 could fit. Skip the expensive PSO entirely.
+                self.last_fit = {'source_x_offset_2': np.nan, 'source_y_offset_2': np.nan,
+                                 'source_size_pc_2': np.nan, 'source2_pso_chi2': np.nan,
+                                 'source1_chisq': stat_1}
+                if self.source1_logL_skip_threshold == np.inf:
+                    # threshold=inf means the PSO NEVER runs for ANY realization in this run --
+                    # every row has the same (lack of) source-2 info, so there's no schema-
+                    # consistency reason to pad with NaN source-2 columns. Return source-1's own
+                    # 4-length result directly, matching a plain single-source magnification call
+                    # (and letting Output.clean()/.cut_high_mags() work normally downstream,
+                    # instead of needing the source-1-only filter this NaN-padding otherwise forces).
+                    return mags_1, images_1, stat_1, flux_ratios_1, flux_ratios_data
                 n_images = len(mags_1)
                 mags_2 = np.full(n_images, np.nan)
                 flux_ratios_2 = np.full(len(flux_ratios_1), np.nan)
                 stat_2 = 1e6  # large-but-finite: keeps combined `stat` finite (so tolerance=np.inf
                 # runs -- e.g. rxj1131_mock_inference.py -- still record this realization) while
                 # still failing any realistic finite acceptance tolerance.
-                self.last_fit = {'source_x_offset_2': np.nan, 'source_y_offset_2': np.nan,
-                                 'source_size_pc_2': np.nan, 'source2_pso_chi2': np.nan,
-                                 'source1_chisq': stat_1}
                 magnifications = np.append(mags_1, mags_2)
                 images = images_1 + [None] * n_images
                 stat = np.sqrt(stat_1 ** 2 + stat_2 ** 2)
